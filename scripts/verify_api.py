@@ -553,5 +553,115 @@ s, r = call("POST", f"/api/property-rectifications/{auto['id']}/recheck", toks["
     "pass": True, "recheck_photos": ["https://example.com/auto-rc.jpg"], "recheck_remark": "按图核验无积水"})
 check("自动任务复查通过、投诉下降", s == 200 and r["data"]["complaints_after"] == 0)
 
+print("== 16. 重点风险期应急响应与跨小区联防 ==")
+# 16.1 列表 / 风险小区 / 种子应急
+s, r = call("GET", "/api/emergencies", toks["street"])
+emlist = r["data"]
+check("应急列表含进行中与已解除历史", len(emlist) >= 2 and any(e["status"] == "active" for e in emlist) and any(e["status"] == "resolved" for e in emlist))
+active_em = next(e for e in emlist if e["status"] == "active")
+s, r = call("GET", "/api/emergencies/risk/communities", toks["street"])
+risks = {x["community_name"]: x for x in r["data"]}
+check("风险小区含主疫区(应急)与周边联防(预警)", risks.get("阳光小区", {}).get("risk_level") == "emergency" and risks.get("滨江花园", {}).get("risk_level") == "warning")
+# 已解除历史应急的老城厢为常态
+check("已解除历史应急小区已降级", "老城厢社区" not in risks or risks["老城厢社区"]["risk_level"] == "normal")
+# 居民无权启动应急
+s, _ = call("POST", "/api/emergencies", toks["resident"], {"title": "x", "communities": [{"community_id": 1}]})
+check("居民无权启动应急(403)", s == 403)
+
+# 16.2 详情：病例轨迹/联防小区/重点积水点/跨小区调度/每日汇总
+s, r = call("GET", f"/api/emergencies/{active_em['id']}", toks["street"])
+d = r["data"]
+check("病例活动轨迹已记录", len(d["cases"]) >= 1 and any("楼顶水箱" in t["place"] for c in d["cases"] for t in c["trajectory"]))
+cmap = {c["community_name"]: c for c in d["communities"]}
+check("联防小区含主疫区+周边", cmap["阳光小区"]["role"] == "affected" and cmap["滨江花园"]["role"] == "surrounding")
+check("重点积水点快照关联病例轨迹", any("邻近病例活动轨迹" in w["link_reason"] for w in d["water_points"]))
+check("重点清单覆盖楼顶/轮胎等多类型", {"楼顶水箱", "废旧轮胎"} <= {w["type_label"] for w in d["water_points"]})
+check("含跨小区消杀队支援", any(x["resource_type"] == "team" and x["team_name"] for x in d["dispatches"]))
+check("含昨日每日汇总", any(x["community_name"] == "全响应合计" and x["summary_date"] for x in d["daily"]))
+# 主疫区应急工单五方同单
+yang_order = cmap["阳光小区"]["work_order_id"]
+od = call("GET", "/api/work-orders/" + str(yang_order), toks["street"])[1]["data"]
+roles5 = {p["role"] for p in od["parties"]}
+check("应急工单五方（居民/物业/消杀/街道/卫监）同单", {"resident", "property", "operator", "street", "supervisor"} <= roles5, f"({roles5})")
+check("应急时间线含启动记录", any("启动应急响应" in l["action"] for l in od["logs"]))
+# 被跨小区调度的消杀二队(operator2)可见，一队(operator)暂不可见
+s, r = call("GET", "/api/emergencies", toks["operator2"])
+check("被支援调度的消杀二队可见应急", any(e["id"] == active_em["id"] for e in r["data"]))
+s, r = call("GET", f"/api/emergencies/{active_em['id']}", toks["property2"])
+check("周边联防小区物业可见应急", s == 200)
+
+# 16.3 跨小区调度：调一队支援滨江 + 药剂不足拒绝
+s, r = call("POST", f"/api/emergencies/{active_em['id']}/dispatch", toks["street"], {
+    "resource_type": "team", "team_id": 1, "to_community_id": cmap["滨江花园"]["community_id"],
+    "from_community_id": cmap["阳光小区"]["community_id"], "action": "一队抽组支援滨江雨水井"})
+check("跨小区调度消杀一队", s == 200)
+s, r = call("GET", "/api/emergencies", toks["operator"])
+check("被调度后消杀一队可见应急", any(e["id"] == active_em["id"] for e in r["data"]))
+chem = call("GET", "/api/chemicals", toks["street"])[1]["data"][0]
+s, r = call("POST", f"/api/emergencies/{active_em['id']}/dispatch", toks["street"], {
+    "resource_type": "chemical", "chemical_id": chem["id"], "amount": 999999, "to_community_id": cmap["阳光小区"]["community_id"]})
+check("药剂调配库存不足被拒绝(409)", s == 409)
+s, r = call("POST", f"/api/emergencies/{active_em['id']}/dispatch", toks["street"], {
+    "resource_type": "chemical", "chemical_id": chem["id"], "amount": 1.0, "to_community_id": cmap["阳光小区"]["community_id"], "action": "应急药剂调配"})
+check("药剂跨小区调配成功并扣库存", s == 200)
+# 受援小区不在联防范围 → 拒绝
+s, r = call("POST", f"/api/emergencies/{active_em['id']}/dispatch", toks["street"], {
+    "resource_type": "grid", "resource_ref": "网格员", "to_community_id": 999})
+check("向非联防小区调度被拒绝(4xx)", 400 <= s < 500)
+
+# 16.4 投诉密度突增 → 自动提升风险等级（老城厢，网格员 4 起 72h 内投诉）
+for i in range(4):
+    call("POST", "/api/reports", toks["grid"], {"community_id": 3, "type": "mosquito_dense",
+        "location_desc": f"老城厢夜间蚊虫密集点{i}", "nearby_population": "老旧居民楼", "has_pets": False})
+s, r = call("GET", "/api/emergencies/risk/communities", toks["street"])
+lao_risk = next((x for x in r["data"] if x["community_name"] == "老城厢社区"), None)
+check("72h投诉突增自动提升风险等级", lao_risk and lao_risk["risk_level"] == "elevated" and lao_risk["complaints_72h"] >= 4, f"({lao_risk})")
+
+# 16.5 街道启动新城厢应急（疾控预警）→ 重点清单/复查每日/五方应急工单
+s, r = call("POST", "/api/emergencies", toks["street"], {
+    "title": "老城厢疾控预警应急", "trigger_type": "cdc_warning", "disease": "登革热",
+    "recheck_interval_days": 1, "description": "疾控蚊媒密度预警，旧改工地基坑积水",
+    "communities": [{"community_id": 3, "role": "affected", "reason": "疾控预警：旧改工地基坑积水"}],
+    "cases": [{"community_id": 3, "case_status": "suspect", "patient_alias": "李某（脱敏）",
+               "onset_date": datetime.now().strftime("%Y-%m-%d"),
+               "trajectory": [{"time": "08:00", "place": "旧改建筑工地基坑", "note": "工地作业"}]}]})
+check("启动疾控预警应急", s == 200 and r["data"]["emerg_no"].startswith("EM"))
+new_em = r["data"]["id"]
+s, d2 = call("GET", f"/api/emergencies/{new_em}", toks["street"])
+nd = d2["data"]
+check("新应急复查频次=每日", nd["emergency"]["recheck_interval_days"] == 1)
+check("新应急重点清单含建筑工地", any("建筑工地" in w["type_label"] for w in nd["water_points"]))
+lao_comm = nd["communities"][0]
+lo = call("GET", "/api/work-orders/" + str(lao_comm["work_order_id"]), toks["street"])[1]["data"]
+check("新应急工单为高优先级协同状态", lo["order"]["status"] == "escalated" and lo["order"]["priority"] >= 100)
+# 应急期间消杀复查期限按小区缩短为 1 天
+oid_lao = lo["order"]["id"]
+call("POST", f"/api/work-orders/{oid_lao}/assign", toks["street"], {"team_id": 1, "scheduled_date": datetime.now().strftime("%Y-%m-%d")})
+call("POST", f"/api/work-orders/{oid_lao}/start", toks["operator"], {})
+call("POST", f"/api/work-orders/{oid_lao}/treatments", toks["operator"], {
+    "chemical_id": chem["id"], "spray_area": "旧改工地基坑", "chemical_used": 1.0,
+    "warning_sign": True, "resident_notified": True, "pet_avoided": True})
+lo = call("GET", "/api/work-orders/" + str(oid_lao), toks["street"])[1]["data"]
+due = lo["order"]["recheck_due_at"]
+check("应急小区消杀后复查期限=次日（频次提高）", due and due[:10] == (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d"), f"({due})")
+
+# 16.6 每日汇总
+s, r = call("POST", f"/api/emergencies/{new_em}/daily-summary", toks["street"], {})
+check("生成每日汇总", s == 200 and "chemical_used" in r["data"])
+s, d2 = call("GET", f"/api/emergencies/{new_em}", toks["street"])
+check("每日汇总含全响应合计行", any(x["community_name"] == "全响应合计" for x in d2["data"]["daily"]))
+
+# 16.7 解除应急 → 自动降级 + 关闭工单 + 归入小区档案
+s, r = call("POST", f"/api/emergencies/{new_em}/resolve", toks["street"], {"note": "积水点清除，降级归档"})
+check("解除应急", s == 200)
+s, r = call("GET", "/api/emergencies/risk/communities", toks["street"])
+lao_risk2 = next((x for x in r["data"] if x["community_name"] == "老城厢社区"), None)
+check("解除后无其他进行中应急则自动降级常态", lao_risk2 is None or lao_risk2["risk_level"] == "normal")
+lo = call("GET", "/api/work-orders/" + str(oid_lao), toks["street"])[1]["data"]
+check("应急工单已关闭", lo["order"]["status"] == "closed")
+arc = call("GET", "/api/communities/3/archive", toks["supervisor"])[1]["data"]
+check("应急处置归入小区消杀档案（含已解除记录）", any(m["emerg_no"] == nd["emergency"]["emerg_no"] and m["status"] == "resolved" for m in arc["emergencies"]))
+check("档案含当前风险等级", arc.get("risk_level_label"))
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

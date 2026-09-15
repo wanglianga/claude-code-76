@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"time"
 
@@ -318,6 +319,106 @@ func seed() {
 	}
 	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, pr3)
 
+	// ========== 重点风险期应急响应与跨小区联防调度（演示） ==========
+	seedEmergency(commIDs, teamIDs, userIDs)
+
 	refreshKeyWaterPoints()
 	log.Println("seed done")
+}
+
+// seedEmergency 构造一个进行中的多小区联防应急（登革热病例）与一个已解除归档的历史应急
+func seedEmergency(commIDs, teamIDs map[string]int64, userIDs map[string]int64) {
+	yang, bin, lao := commIDs["阳光小区"], commIDs["滨江花园"], commIDs["老城厢社区"]
+	t2 := teamIDs["消杀二队"]
+
+	// 进行中应急：周边出现确诊病例 → 阳光主疫区 + 滨江周边联防
+	var eid int64
+	if err := db.QueryRow(`INSERT INTO emergency_responses(title, trigger_type, disease, description, recheck_interval_days, status, created_by, started_at)
+		VALUES('登革热确诊病例联防应急','nearby_case','登革热','阳光小区发现 1 例登革热确诊，病例活动轨迹涉及 7 号楼楼顶与北门堆放点；同步提升滨江花园为周边联防。应急期间复查频次提高到每日一次。',1,'active',$1,$2) RETURNING id`,
+		userIDs["street"], time.Now().AddDate(0, 0, -2)).Scan(&eid); err != nil {
+		log.Fatalf("seed emergency: %v", err)
+	}
+	db.Exec(`UPDATE emergency_responses SET emerg_no='EM'||LPAD(id::text,8,'0') WHERE id=$1`, eid)
+
+	type ec struct {
+		cid    int64
+		role   string
+		risk   string
+		reason string
+	}
+	ecm := []ec{
+		{yang, "affected", "emergency", "确诊病例活动轨迹涉及本小区多处积水点"},
+		{bin, "surrounding", "warning", "与主疫区相邻，纳入跨小区联防"},
+	}
+	ecOrder := map[int64]int64{}
+	for _, x := range ecm {
+		var cstart int
+		db.QueryRow(`SELECT count(*) FROM reports WHERE community_id=$1`, x.cid).Scan(&cstart)
+		var oid int64
+		if err := db.QueryRow(`INSERT INTO work_orders(community_id, priority, status, created_by, emergency_response_id)
+			VALUES($1,100,'escalated',$2,$3) RETURNING id`, x.cid, userIDs["street"], eid).Scan(&oid); err != nil {
+			log.Fatalf("seed emergency order: %v", err)
+		}
+		db.Exec(`UPDATE work_orders SET order_no='WO'||LPAD(id::text,8,'0') WHERE id=$1`, oid)
+		db.Exec(`INSERT INTO emergency_communities(emergency_id, community_id, role, risk_level, risk_reason, work_order_id, complaints_at_start)
+			VALUES($1,$2,$3,$4,$5,$6,$7)`, eid, x.cid, x.role, x.risk, x.reason, oid, cstart)
+		ecOrder[x.cid] = oid
+		db.Exec(`UPDATE communities SET risk_level=$1, risk_reason=$2, risk_updated_at=now() WHERE id=$3`, x.risk, x.reason, x.cid)
+		ensureAllParties(oid)
+		addLog(oid, nil, "启动应急响应", "登革热确诊病例联防应急启动，复查频次提高为每 1 天一次，五方同单协同")
+	}
+
+	// 病例与活动轨迹（场所与积水点位置一致 → 快照标记“邻近病例活动轨迹”）
+	cases := []emergCaseReq{
+		{CommunityID: yang, CaseStatus: "confirmed", PatientAlias: "张某（脱敏）", OnsetDate: time.Now().AddDate(0, 0, -3).Format("2006-01-02"), Source: "疾控通报",
+			Trajectory: []map[string]any{
+				{"time": time.Now().AddDate(0, 0, -5).Format("2006-01-02 15:04") + " 09:00", "place": "7 号楼楼顶水箱", "note": "上楼顶晾晒"},
+				{"time": time.Now().AddDate(0, 0, -5).Format("2006-01-02") + " 18:00", "place": "北门废旧轮胎堆放点", "note": "取物停留约 20 分钟"},
+			}},
+	}
+	traj1, _ := json.Marshal(cases[0].Trajectory)
+	db.Exec(`INSERT INTO emergency_cases(emergency_id, community_id, case_status, patient_alias, onset_date, trajectory, source)
+		VALUES($1,$2,'confirmed',$3,$4,$5,'疾控通报')`, eid, yang, "张某（脱敏）", cases[0].OnsetDate, RawJSON(traj1))
+
+	// 重点积水点快照（楼顶水箱/地下车库/绿化带/雨水井/建筑工地等，关联轨迹）
+	snapshotEmergencyWaterPoints(eid, []int64{yang, bin}, cases)
+
+	// 跨小区支援：消杀二队（负责滨江）跨小区支援阳光主疫区
+	db.Exec(`INSERT INTO emergency_dispatch(emergency_id, from_community_id, to_community_id, team_id, resource_type, resource_ref, action, created_by)
+		VALUES($1,$2,$3,$4,'team','跨小区应急消杀队','二队抽组 3 人支援阳光楼顶水箱与地下车库加密处置',$5)`,
+		eid, bin, yang, t2, userIDs["street"])
+	addTeamParties(ecOrder[yang], t2)
+	addLog(ecOrder[yang], nil, "跨小区支援", "调度「消杀二队」滨江花园 → 阳光小区 支援应急消杀")
+	// 网格 + 卫监力量
+	db.Exec(`INSERT INTO emergency_dispatch(emergency_id, to_community_id, resource_type, resource_ref, action, created_by)
+		VALUES($1,$2,'grid','社区网格员 4 名','入户调查与布雷图指数监测',$3)`, eid, yang, userIDs["street"])
+
+	// 昨日每日汇总（投诉变化/积水点清零/药剂消耗/整改责任）
+	yday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	db.Exec(`INSERT INTO emergency_daily_summaries(emergency_id, community_id, summary_date, new_complaints, open_water_points, cleared_water_points, chemical_used, treatments, rect_open, rect_overdue, note)
+		VALUES($1,NULL,$2,3,6,2,12.5,4,1,1,'应急第 1 天合计：新增投诉 3，清除积水点 2，药剂 12.5')`,
+		eid, yday)
+	db.Exec(`INSERT INTO emergency_daily_summaries(emergency_id, community_id, summary_date, new_complaints, open_water_points, cleared_water_points, chemical_used, treatments, rect_open, rect_overdue)
+		VALUES($1,$2,$3,3,4,2,9.0,3,1,1),($1,$4,$3,0,2,0,3.5,1,0,0)`,
+		eid, yang, yday, bin)
+
+	// 历史应急（老城厢，已解除并归档）：风险已自动降级为常态
+	var eid2 int64
+	if err := db.QueryRow(`INSERT INTO emergency_responses(title, trigger_type, disease, description, recheck_interval_days, status, created_by, started_at, resolved_at, resolve_note)
+		VALUES('老旧工地积水应急','cdc_warning','登革热','疾控蚊媒密度预警，旧改工地基坑积水处置。',2,'resolved',$1,$2,$3,'积水点全部清除，连续两周无新发病例，解除并归档') RETURNING id`,
+		userIDs["street"], time.Now().AddDate(0, 0, -40), time.Now().AddDate(0, 0, -33)).Scan(&eid2); err != nil {
+		log.Fatalf("seed emergency 2: %v", err)
+	}
+	db.Exec(`UPDATE emergency_responses SET emerg_no='EM'||LPAD(id::text,8,'0') WHERE id=$1`, eid2)
+	var oid2 int64
+	db.QueryRow(`INSERT INTO work_orders(community_id, priority, status, created_by, emergency_response_id, closed_at)
+		VALUES($1,90,'closed',$2,$3,$4) RETURNING id`, lao, userIDs["street"], eid2, time.Now().AddDate(0, 0, -33)).Scan(&oid2)
+	db.Exec(`UPDATE work_orders SET order_no='WO'||LPAD(id::text,8,'0') WHERE id=$1`, oid2)
+	db.Exec(`INSERT INTO emergency_communities(emergency_id, community_id, role, risk_level, risk_reason, work_order_id, complaints_at_start)
+		VALUES($1,$2,'affected','emergency','疾控预警：旧改工地基坑积水',$3,2)`, eid2, lao, oid2)
+	snapshotEmergencyWaterPoints(eid2, []int64{lao}, nil)
+	db.Exec(`INSERT INTO emergency_daily_summaries(emergency_id, community_id, summary_date, new_complaints, open_water_points, cleared_water_points, chemical_used, treatments, rect_open, rect_overdue)
+		VALUES($1,NULL,$2,1,1,1,6.0,2,0,0)`, eid2, time.Now().AddDate(0, 0, -34).Format("2006-01-02"))
+	// 历史应急小区风险已降级为常态
+	db.Exec(`UPDATE communities SET risk_level='normal', risk_reason='', risk_updated_at=now() WHERE id=$1`, lao)
 }

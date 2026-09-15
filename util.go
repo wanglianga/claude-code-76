@@ -139,6 +139,35 @@ func (s *StringList) Scan(src any) error {
 	return fmt.Errorf("StringList: unsupported type %T", src)
 }
 
+// RawJSON 存储/读取任意 JSON（如病例活动轨迹对象数组）
+type RawJSON []byte
+
+func (j RawJSON) Value() (driver.Value, error) {
+	if len(j) == 0 {
+		return "[]", nil
+	}
+	return string(j), nil
+}
+
+func (j *RawJSON) Scan(src any) error {
+	switch v := src.(type) {
+	case []byte:
+		*j = append((*j)[:0], v...)
+	case string:
+		*j = []byte(v)
+	case nil:
+		*j = []byte("[]")
+	}
+	return nil
+}
+
+func (j RawJSON) MarshalJSON() ([]byte, error) {
+	if len(j) == 0 {
+		return []byte("[]"), nil
+	}
+	return j, nil
+}
+
 // ---- 枚举与中文标签 ----
 
 var RoleLabels = map[string]string{
@@ -271,6 +300,45 @@ var PropRectReminderKindLabels = map[string]string{
 	"rect_overdue":    "整改超期",
 	"recheck_overdue": "复查超期",
 	"supervise":       "街道督办",
+}
+
+// ========== 重点风险期应急响应 ==========
+
+// 小区风险等级
+var CommunityRiskLabels = map[string]string{
+	"normal":  "常态",
+	"elevated": "风险升高",
+	"warning": "预警",
+	"emergency": "应急",
+}
+
+// 应急触发类型
+var EmergTriggerLabels = map[string]string{
+	"cdc_warning":      "疾控蚊媒传染病预警",
+	"nearby_case":      "周边小区疑似/确诊病例",
+	"complaint_surge":  "投诉密度突增",
+	"manual":           "街道人工启动",
+}
+
+// 联防小区角色
+var EmergCommunityRoleLabels = map[string]string{
+	"affected":    "主疫区",
+	"surrounding": "周边联防",
+}
+
+// 病例状态
+var EmergCaseStatusLabels = map[string]string{
+	"suspect":   "疑似",
+	"confirmed": "确诊",
+}
+
+// 应急调度资源类型
+var EmergResourceLabels = map[string]string{
+	"team":       "消杀队支援",
+	"chemical":   "药剂调配",
+	"grid":       "社区网格",
+	"property":   "物业",
+	"supervisor": "卫生监督",
 }
 
 var IssueStatusLabels = map[string]string{

@@ -87,6 +87,11 @@ func hMeta(c *Ctx) {
 		"wind_directions":           WindDirections,
 		"pet_types":                 PetTypes,
 		"pet_complaint_status_labels": PetComplaintStatusLabels,
+		"community_risk_labels":       CommunityRiskLabels,
+		"emerg_trigger_labels":        EmergTriggerLabels,
+		"emerg_community_role_labels": EmergCommunityRoleLabels,
+		"emerg_case_status_labels":    EmergCaseStatusLabels,
+		"emerg_resource_labels":       EmergResourceLabels,
 		"communities":               comms,
 		"teams":                     teams,
 		"users":                     users,
@@ -187,6 +192,8 @@ func hCreateReport(c *Ctx) {
 		db.Exec(`INSERT INTO water_points(community_id, type, location_desc, source, report_id, discovered_by)
 			VALUES($1,$2,$3,'report',$4,$5)`, req.CommunityID, wpType, req.LocationDesc, id, c.User.ID)
 	}
+	// 投诉密度突增 → 自动提升小区风险等级（重点风险期应急响应）
+	maybeElevateCommunityRisk(req.CommunityID)
 	cacheDel(fmt.Sprintf("density:%d", req.CommunityID), "dashboard:closedloop")
 	row := db.QueryRow(reportSelect+` WHERE r.id=$1`, id)
 	rep, err := scanReport(row)

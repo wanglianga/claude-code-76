@@ -88,21 +88,21 @@ const TABS = {
     ['report', '上报问题'], ['reports', '我的上报'], ['pets', '宠物投诉'], ['zones', '儿童活动区'], ['notices', '居民告知'],
   ],
   property: [
-    ['report', '上报问题'], ['rects', '整改任务'], ['prects', '积水整改'], ['orders', '小区工单'], ['notices', '居民告知'],
+    ['report', '上报问题'], ['rects', '整改任务'], ['prects', '积水整改'], ['emerg', '应急联防'], ['orders', '小区工单'], ['notices', '居民告知'],
   ],
   grid: [
-    ['report', '上报问题'], ['points', '积水点管理'], ['prects', '积水整改'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
+    ['report', '上报问题'], ['points', '积水点管理'], ['prects', '积水整改'], ['emerg', '应急联防'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
   ],
   operator: [
-    ['orders', '我的工单'], ['prects', '积水整改'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
+    ['orders', '我的工单'], ['emerg', '应急联防'], ['prects', '积水整改'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
   ],
   street: [
-    ['dispatch', '派单中心'], ['orders', '工单总览'], ['prects', '积水整改'], ['points', '积水点'], ['keylist', '重点积水点'],
+    ['dispatch', '派单中心'], ['emerg', '应急联防'], ['orders', '工单总览'], ['prects', '积水整改'], ['points', '积水点'], ['keylist', '重点积水点'],
     ['chems', '药剂库存'], ['sched', '排班管理'], ['rainfall', '降雨记录'], ['risk', '重点风险期'],
     ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
   ],
   supervisor: [
-    ['orders', '工单总览'], ['prects', '积水整改'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
+    ['orders', '工单总览'], ['emerg', '应急联防'], ['prects', '积水整改'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
   ],
   kindergarten: [
     ['zones', '消杀计划确认'], ['notices', '居民告知'],
@@ -767,6 +767,196 @@ async function submitPRectSupervise(id) {
   });
 }
 
+/* ---------- 重点风险期应急响应与跨小区联防 ---------- */
+const RISK_COLOR = { normal: 'b-green', elevated: 'b-orange', warning: 'b-red', emergency: 'b-red' };
+function riskBadge(l, lk) { return badge(lk || l, RISK_COLOR[l] || 'b-gray'); }
+
+async function renderEmerg(el) {
+  const role = me.role;
+  const risks = await api('/api/emergencies/risk/communities');
+  el.innerHTML = `
+  ${role === 'street' ? `<div class="card"><h3>启动重点风险期应急响应（疾控预警 / 周边病例 / 投诉突增，可多小区联防）</h3>
+    <div class="form-grid">
+      <div class="form-item"><label>应急标题 *</label><input id="em-title" placeholder="如：登革热确诊病例联防应急"></div>
+      <div class="form-item"><label>触发类型</label><select id="em-trigger">${opts(meta.emerg_trigger_labels, 'nearby_case')}</select></div>
+      <div class="form-item"><label>传染病</label><input id="em-disease" value="登革热"></div>
+      <div class="form-item"><label>应急复查频次（天/次）</label><input id="em-interval" type="number" value="1" min="1"></div>
+      <div class="form-item full"><label>联防小区 *（勾选并设置主疫区/周边联防）</label>
+        <div id="em-comms">${(meta.communities || []).map(c => `<label style="display:inline-block;margin:2px 14px 2px 0">
+          <input type="checkbox" class="em-comm" value="${c.id}"> ${esc(c.name)}
+          <select class="em-role" data-comm="${c.id}" style="width:auto"><option value="affected">主疫区</option><option value="surrounding">周边联防</option></select></label>`).join('')}</div></div>
+      <div class="form-item"><label>病例状态</label><select id="em-cstatus"><option value="confirmed">确诊</option><option value="suspect">疑似</option></select></div>
+      <div class="form-item"><label>患者脱敏称谓</label><input id="em-calias" placeholder="如：张某（脱敏）"></div>
+      <div class="form-item"><label>发病日期</label><input type="date" id="em-cdate"></div>
+      <div class="form-item full"><label>病例活动轨迹（每行一条：时间 | 场所 | 说明，场所与积水点位置一致时自动关联）</label>
+        <textarea id="em-traj" placeholder="2026-09-10 09:00 | 7 号楼楼顶水箱 | 上楼顶晾晒&#10;2026-09-10 18:00 | 北门废旧轮胎堆放点 | 取物停留20分钟"></textarea></div>
+      <div class="form-item full"><label>情况说明</label><textarea id="em-desc" placeholder="病例情况、预警内容、联防要求等"></textarea></div>
+    </div>
+    <div class="btn-row"><button class="btn red" onclick="createEmerg()">启动应急（五方同单+重点清单+每日复查）</button></div>
+  </div>` : ''}
+  <div class="card"><h3>风险小区（自动提升：疾控预警 / 周边病例 / 72 小时投诉密度突增）</h3>
+    ${risks.length ? `<div class="table-wrap"><table>
+      <tr><th>小区</th><th>风险等级</th><th>72h投诉</th><th>未清零积水点</th><th>进行中应急</th><th>提升原因</th></tr>
+      ${risks.map(r => `<tr><td><b>${esc(r.community_name)}</b></td><td>${riskBadge(r.risk_level, r.risk_label)}</td>
+        <td>${r.complaints_72h >= emergSurgeAt() ? badge(r.complaints_72h, 'b-red') : r.complaints_72h}</td>
+        <td>${r.open_water_points}</td><td>${r.active_emerg_no ? badge(r.active_emerg_no, 'b-red') : '-'}</td>
+        <td style="font-size:12px;color:#90a4ae">${esc(r.risk_reason || '-')}</td></tr>`).join('')}
+    </table></div>` : '<div class="banner ok">当前各小区风险等级为常态。</div>'}
+  </div>
+  <div class="card"><h3>应急响应与跨小区联防调度</h3><div id="emerg-table"></div></div>`;
+  await loadEmergList();
+}
+function emergSurgeAt() { return 4; }
+async function loadEmergList() {
+  const list = await api('/api/emergencies');
+  document.getElementById('emerg-table').innerHTML = `<div class="table-wrap"><table>
+    <tr><th>应急单号</th><th>标题</th><th>触发</th><th>传染病</th><th>联防小区</th><th>重点积水点</th><th>复查频次</th><th>状态</th><th>启动时间</th><th>操作</th></tr>
+    ${list.map(e => `<tr style="${e.status==='active'?'background:#fff5f5':''}">
+      <td>${esc(e.emerg_no)}</td><td><b>${esc(e.title)}</b></td><td>${esc(e.trigger_label)}</td><td>${esc(e.disease)}</td>
+      <td>${e.community_count}</td><td>${e.water_point_count}</td><td>每 ${e.recheck_interval_days} 天</td>
+      <td>${e.status==='active'?badge('应急中','b-red'):badge('已解除归档','b-green')}</td>
+      <td>${fmtT(e.started_at)}</td>
+      <td><button class="btn sm" onclick="openEmerg(${e.id})">详情</button></td>
+    </tr>`).join('') || '<tr><td colspan="10">暂无应急响应</td></tr>'}
+  </table></div>`;
+}
+function parseTraj(text) {
+  return text.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+    const p = l.split('|').map(s => s.trim());
+    return { time: p[0] || '', place: p[1] || '', note: p[2] || '' };
+  }).filter(t => t.place);
+}
+function selectedEmergComms() {
+  return [...document.querySelectorAll('.em-comm:checked')].map(cb => ({
+    community_id: parseInt(cb.value),
+    role: document.querySelector(`.em-role[data-comm="${cb.value}"]`).value,
+  }));
+}
+async function createEmerg() {
+  await run(async () => {
+    const comms = selectedEmergComms();
+    if (!comms.length) { toast('请至少勾选一个联防小区', false); return; }
+    const traj = parseTraj(val('em-traj'));
+    const body = {
+      title: val('em-title'), trigger_type: val('em-trigger'), disease: val('em-disease'),
+      recheck_interval_days: parseInt(val('em-interval')) || 1, description: val('em-desc'),
+      communities: comms, cases: traj.length ? [{
+        community_id: comms[0].community_id, case_status: val('em-cstatus'),
+        patient_alias: val('em-calias'), onset_date: val('em-cdate'), trajectory: traj,
+      }] : [],
+    };
+    const r = await api('/api/emergencies', { method: 'POST', body });
+    toast(r.message); switchTab('emerg');
+  });
+}
+async function openEmerg(id) {
+  document.getElementById('modal-mask').classList.remove('hidden');
+  document.getElementById('modal-body').innerHTML = '加载中...';
+  await run(() => renderEmergDetail(id));
+}
+async function renderEmergDetail(id) {
+  const d = await api('/api/emergencies/' + id);
+  const e = d.emergency, role = me.role;
+  const active = e.status === 'active';
+  let actions = '';
+  if (role === 'street' && active) {
+    const chems = chemCache || (chemCache = await api('/api/chemicals'));
+    const teams = meta.teams || [];
+    const commOpts = (d.communities || []).map(c => `<option value="${c.community_id}">${esc(c.community_name)}</option>`).join('');
+    actions += `<div class="section"><h4>跨小区联防调度（消杀队 / 药剂 / 网格 / 物业 / 卫生监督，含跨小区支援）</h4>
+      <div class="form-grid">
+        <div class="form-item"><label>资源类型</label><select id="ed-rtype" onchange="document.getElementById('ed-team').style.display=this.value==='team'?'block':'none';document.getElementById('ed-chem').style.display=this.value==='chemical'?'block':'none'">
+          ${opts(meta.emerg_resource_labels, 'team')}</select></div>
+        <div class="form-item" id="ed-team"><label>支援消杀队</label><select id="ed-teamid">${teams.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}</select></div>
+        <div class="form-item" id="ed-chem" style="display:none"><label>调配药剂/数量</label>
+          <span class="inline-form"><select id="ed-chemid" style="width:auto">${chems.map(c => `<option value="${c.id}">${esc(c.name)}（库存 ${c.stock}）</option>`).join('')}</select>
+          <input id="ed-amount" type="number" step="0.1" style="width:90px" placeholder="数量"></span></div>
+        <div class="form-item"><label>支援来源小区（跨小区支援）</label><select id="ed-from"><option value="">街道统一调度</option>${commOpts}</select></div>
+        <div class="form-item"><label>受援小区 *</label><select id="ed-to">${commOpts}</select></div>
+        <div class="form-item full"><label>调度说明</label><input id="ed-action" placeholder="如：抽组3人支援楼顶水箱加密处置"></div>
+      </div>
+      <div class="btn-row"><button class="btn orange" onclick="submitEmergDispatch(${id})">执行调度（同步受援小区应急工单）</button></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="genEmergDaily(${id})">生成今日汇总（投诉/清零/药剂/整改）</button>
+      <button class="btn red" onclick="resolveEmerg(${id})">风险解除（自动降级+归档）</button>
+    </div>`;
+  }
+  document.getElementById('modal-body').innerHTML = `
+    <span class="close-x" onclick="closeModal()">✕</span>
+    <h2>应急 ${esc(e.emerg_no)} ${active?badge('应急中','b-red'):badge('已解除归档','b-green')}</h2>
+    <div class="sub">${esc(e.disease)} · ${esc(e.trigger_label)} ｜ 启动 ${fmtT(e.started_at)}${e.resolved_at?' ｜ 解除 '+fmtT(e.resolved_at):''} ｜ 复查频次 <b>每 ${e.recheck_interval_days} 天</b></div>
+    <div class="kv"><div style="grid-column:1/-1"><span class="k">标题：</span>${esc(e.title)}</div>
+      <div style="grid-column:1/-1"><span class="k">说明：</span>${esc(e.description||'-')}</div>
+      ${e.resolve_note?`<div style="grid-column:1/-1"><span class="k">解除说明：</span>${esc(e.resolve_note)}</div>`:''}</div>
+
+    <div class="section"><h4>病例与活动轨迹（${d.cases.length}）</h4>${d.cases.length?`<div class="table-wrap"><table>
+      <tr><th>小区</th><th>状态</th><th>脱敏称谓</th><th>发病日期</th><th>活动轨迹</th><th>来源</th></tr>
+      ${d.cases.map(c=>`<tr><td>${esc(c.community_name)}</td><td>${c.case_status==='confirmed'?badge('确诊','b-red'):badge('疑似','b-orange')}</td>
+        <td>${esc(c.patient_alias||'-')}</td><td>${esc(c.onset_date||'-')}</td>
+        <td>${(c.trajectory||[]).map(t=>`· ${esc(t.time||'')} <b>${esc(t.place||'')}</b> ${esc(t.note||'')}`).join('<br>')||'-'}</td>
+        <td>${esc(c.source)}</td></tr>`).join('')}
+    </table></div>`:'<div style="color:#90a4ae">无病例记录（可为疾控预警/投诉突增触发）</div>'}</div>
+
+    <div class="section"><h4>联防小区与处置进展（五方在同一应急工单协同）</h4><div class="table-wrap"><table>
+      <tr><th>小区</th><th>角色</th><th>风险</th><th>投诉(建档→现)</th><th>未清零/已清零</th><th>消杀次数</th><th>药剂消耗</th><th>复查有幼虫</th><th>整改(开/超期)</th><th>儿童区作业</th><th>宠物投诉</th><th>应急工单</th></tr>
+      ${d.communities.map(c=>`<tr>
+        <td><b>${esc(c.community_name)}</b></td><td>${c.role==='affected'?badge('主疫区','b-red'):badge('周边联防','b-orange')}</td><td>${riskBadge(c.risk_level,c.risk_label)}</td>
+        <td>${c.complaints_at_start} → ${c.complaints_now} ${c.complaint_delta>0?badge('↑'+c.complaint_delta,'b-red'):(c.complaint_delta<0?badge('↓'+(-c.complaint_delta),'b-green'):'持平')}</td>
+        <td>${c.open_water_points} / ${badge(c.cleared_water_points,'b-green')}</td>
+        <td>${c.treatments}</td><td>${c.chemical_used.toFixed(1)}</td>
+        <td>${c.recheck_larvae?badge(c.recheck_larvae,'b-red'):0}</td>
+        <td>${c.rect_open} / ${c.rect_overdue?badge(c.rect_overdue,'b-red'):0}</td>
+        <td>${c.child_zone_plans||0}</td><td>${c.pet_complaints||0}</td>
+        <td><button class="btn sm" onclick="closeModal();openOrder(${c.work_order_id})">${'工单'}</button></td>
+      </tr>`).join('')}
+    </table></div></div>
+
+    <div class="section"><h4>重点积水点清单（楼顶水箱/地下车库/绿化带/雨水井/建筑工地等，关联病例轨迹）</h4><div class="table-wrap"><table>
+      <tr><th>小区</th><th>类型</th><th>位置</th><th>关联依据</th><th>建档时</th><th>当前状态</th></tr>
+      ${d.water_points.map(w=>`<tr><td>${esc(w.community_name)}</td><td>${esc(w.type_label)}</td><td><b>${esc(w.location_desc)}</b></td>
+        <td style="font-size:12px">${esc(w.link_reason)}</td>
+        <td>${sBadge(w.status_snapshot, labelOf2(meta.water_point_status_labels,w.status_snapshot))}</td>
+        <td>${sBadge(w.current_status, w.status_label)}</td></tr>`).join('')||'<tr><td colspan="6">暂无</td></tr>'}
+    </table></div></div>
+
+    <div class="section"><h4>跨小区联防调度（${d.dispatches.length}）</h4><div class="table-wrap"><table>
+      <tr><th>资源</th><th>支援方</th><th>受援方</th><th>队伍/物资</th><th>数量</th><th>调度内容</th><th>时间</th></tr>
+      ${d.dispatches.map(x=>`<tr><td>${esc(x.resource_label)}</td><td>${esc(x.from_community_name||'街道')}</td><td>${esc(x.to_community_name)}</td>
+        <td>${esc(x.team_name||x.resource_ref||'-')}</td><td>${x.amount||'-'}</td><td>${esc(x.action||'-')}</td><td>${fmtT(x.created_at)}</td></tr>`).join('')||'<tr><td colspan="7">暂无调度</td></tr>'}
+    </table></div></div>
+
+    <div class="section"><h4>每日汇总（风险解除前：投诉变化 / 积水点清零 / 药剂消耗 / 整改责任）</h4><div class="table-wrap"><table>
+      <tr><th>日期</th><th>范围</th><th>新增投诉</th><th>未清零</th><th>当日清零</th><th>消杀次数</th><th>药剂消耗</th><th>整改(开/超期)</th><th>备注</th></tr>
+      ${d.daily.map(x=>`<tr><td>${esc(x.summary_date)}</td><td>${esc(x.community_name)}</td><td>${x.new_complaints}</td><td>${x.open_water_points}</td>
+        <td>${x.cleared_water_points}</td><td>${x.treatments}</td><td>${x.chemical_used.toFixed(1)}</td>
+        <td>${x.rect_open}/${x.rect_overdue?badge(x.rect_overdue,'b-red'):0}</td><td>${esc(x.note||'-')}</td></tr>`).join('')||'<tr><td colspan="9">暂无每日汇总</td></tr>'}
+    </table></div></div>
+    ${actions}`;
+}
+function labelOf2(m,k){return (m&&m[k])||k;}
+async function submitEmergDispatch(id) {
+  await run(async () => {
+    const rtype = val('ed-rtype');
+    const body = { resource_type: rtype, to_community_id: parseInt(val('ed-to')), from_community_id: parseInt(val('ed-from'))||0, action: val('ed-action') };
+    if (rtype==='team') body.team_id = parseInt(val('ed-teamid'));
+    if (rtype==='chemical') { body.chemical_id = parseInt(val('ed-chemid')); body.amount = parseFloat(val('ed-amount'))||0; }
+    else body.resource_ref = '';
+    const r = await api(`/api/emergencies/${id}/dispatch`, { method:'POST', body });
+    toast(r.message); renderEmergDetail(id);
+  });
+}
+async function genEmergDaily(id) {
+  await run(async () => { const r = await api(`/api/emergencies/${id}/daily-summary`, { method:'POST', body:{} }); toast(r.message); renderEmergDetail(id); });
+}
+async function resolveEmerg(id) {
+  await run(async () => {
+    const note = prompt('风险解除说明（自动降级并归档到小区消杀档案）：', '积水点全部清除，无新发病例，解除应急') || '';
+    const r = await api(`/api/emergencies/${id}/resolve`, { method:'POST', body:{ note } });
+    toast(r.message); closeModal(); switchTab('emerg');
+  });
+}
+
 /* ---------- 居民告知 ---------- */
 async function renderNotices(el) {
   const list = await api('/api/notifications');
@@ -1285,6 +1475,19 @@ async function loadArchive() {
     </div>
     <div class="section"><h4>最近居民告知</h4>
       ${a.recent_notifications.map(n => `<div>· <b>${esc(n.title)}</b> ${esc(n.content)} <span style="color:#90a4ae">${fmtT(n.created_at)}</span></div>`).join('') || '暂无'}
+    </div>
+    <div class="section"><h4>风险等级与重点风险期应急归档</h4>
+      <div>当前风险等级：${a.risk_level ? riskBadge(a.risk_level, a.risk_level_label) : badge('常态','b-green')} ${a.risk_reason ? '<span style="color:#90a4ae;font-size:12px">'+esc(a.risk_reason)+'</span>' : ''}</div>
+      <div class="table-wrap" style="margin-top:8px"><table>
+        <tr><th>应急单号</th><th>标题</th><th>触发</th><th>传染病</th><th>复查频次</th><th>状态</th><th>投诉变化</th><th>启动/解除</th></tr>
+        ${(a.emergencies||[]).map(m=>`<tr>
+          <td>${esc(m.emerg_no)}</td><td>${esc(m.title)}</td><td>${esc(m.trigger_label)}</td><td>${esc(m.disease)}</td>
+          <td>每 ${m.recheck_interval_days} 天</td>
+          <td>${m.status==='active'?badge('应急中','b-red'):badge('已解除归档','b-green')}</td>
+          <td>${m.complaint_delta>0?badge('↑'+m.complaint_delta,'b-red'):(m.complaint_delta<0?badge('↓'+(-m.complaint_delta),'b-green'):'持平')}</td>
+          <td>${fmtT(m.started_at)}<br>${m.resolved_at?fmtT(m.resolved_at):'-'}</td>
+        </tr>`).join('') || '<tr><td colspan="8">暂无应急记录</td></tr>'}
+      </table></div>
     </div>`;
 }
 
@@ -1298,6 +1501,7 @@ const TAB_RENDERERS = {
   orders: renderOrders,
   rects: renderRects,
   prects: renderPRects,
+  emerg: renderEmerg,
   notices: renderNotices,
   chems: renderChems,
   sched: renderSched,

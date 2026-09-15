@@ -136,6 +136,14 @@ func recheckIntervalDays() int {
 	return 7
 }
 
+// recheckIntervalForCommunity 应急联防小区优先采用应急复查频次，其次重点风险期，默认 7 天
+func recheckIntervalForCommunity(communityID int64) int {
+	if iv, ok := emergencyRecheckInterval(communityID); ok {
+		return iv
+	}
+	return recheckIntervalDays()
+}
+
 // closeConditions 返回工单闭环条件达成情况
 func closeConditions(orderID int64) map[string]bool {
 	conds := map[string]bool{}
@@ -581,13 +589,13 @@ func hAssignOrder(c *Ctx) {
 		return
 	}
 	res, err := db.Exec(`UPDATE work_orders SET team_id=$1, scheduled_date=$2, status='assigned', updated_at=now()
-		WHERE id=$3 AND status IN ('pending','assigned')`, req.TeamID, req.ScheduledDate, id)
+		WHERE id=$3 AND status IN ('pending','assigned','escalated')`, req.TeamID, req.ScheduledDate, id)
 	if err != nil {
 		jsonErr(c.W, 500, err.Error())
 		return
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		jsonErr(c.W, 409, "工单状态不允许派单（仅待派单/已派单可调整）")
+		jsonErr(c.W, 409, "工单状态不允许派单（仅待派单/已派单/应急协同可调整）")
 		return
 	}
 	addTeamParties(id, req.TeamID)
@@ -643,7 +651,8 @@ func hCreateTreatment(c *Ctx) {
 	}
 	var status string
 	var wpID sql.NullInt64
-	if err := db.QueryRow(`SELECT status, water_point_id FROM work_orders WHERE id=$1`, id).Scan(&status, &wpID); err != nil {
+	var commID int64
+	if err := db.QueryRow(`SELECT status, water_point_id, community_id FROM work_orders WHERE id=$1`, id).Scan(&status, &wpID, &commID); err != nil {
 		jsonErr(c.W, 404, "工单不存在")
 		return
 	}
@@ -693,7 +702,7 @@ func hCreateTreatment(c *Ctx) {
 			return
 		}
 	}
-	due := time.Now().AddDate(0, 0, recheckIntervalDays())
+	due := time.Now().AddDate(0, 0, recheckIntervalForCommunity(commID))
 	if _, err := tx.Exec(`UPDATE work_orders SET status='recheck_pending', recheck_due_at=$1, updated_at=now() WHERE id=$2`, due, id); err != nil {
 		jsonErr(c.W, 500, err.Error())
 		return

@@ -383,4 +383,110 @@ CREATE TABLE IF NOT EXISTS property_rect_reminders (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_prop_rect_reminders ON property_rect_reminders(rectification_id);
+
+-- ========== 重点风险期应急响应与跨小区联防调度 ==========
+-- 小区风险等级（常态/风险升高/预警/应急）
+ALTER TABLE communities ADD COLUMN IF NOT EXISTS risk_level TEXT NOT NULL DEFAULT 'normal';
+ALTER TABLE communities ADD COLUMN IF NOT EXISTS risk_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE communities ADD COLUMN IF NOT EXISTS risk_updated_at TIMESTAMPTZ;
+
+-- 工单关联应急响应（五方同单协同的应急工单）
+ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS emergency_response_id BIGINT;
+CREATE INDEX IF NOT EXISTS idx_orders_emerg ON work_orders(emergency_response_id);
+
+-- 应急响应主表（一次疾控预警/病例/投诉突增触发，可覆盖多个联防小区）
+CREATE TABLE IF NOT EXISTS emergency_responses (
+  id BIGSERIAL PRIMARY KEY,
+  emerg_no TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  trigger_type TEXT NOT NULL DEFAULT 'cdc_warning', -- cdc_warning|nearby_case|complaint_surge|manual
+  disease TEXT NOT NULL DEFAULT '登革热',
+  description TEXT NOT NULL DEFAULT '',
+  recheck_interval_days INT NOT NULL DEFAULT 1,      -- 应急期间复查频次（天）
+  status TEXT NOT NULL DEFAULT 'active',             -- active|resolved
+  created_by BIGINT REFERENCES users(id),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ,
+  resolve_note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_emerg_status ON emergency_responses(status);
+
+-- 病例与活动轨迹（疑似/确诊，关联到联防小区）
+CREATE TABLE IF NOT EXISTS emergency_cases (
+  id BIGSERIAL PRIMARY KEY,
+  emergency_id BIGINT NOT NULL REFERENCES emergency_responses(id) ON DELETE CASCADE,
+  community_id BIGINT REFERENCES communities(id),
+  case_status TEXT NOT NULL DEFAULT 'suspect',       -- suspect|confirmed
+  patient_alias TEXT NOT NULL DEFAULT '',            -- 隐私脱敏称谓
+  onset_date DATE,
+  trajectory JSONB NOT NULL DEFAULT '[]',            -- [{time, place, note}]
+  source TEXT NOT NULL DEFAULT '疾控通报',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_emerg_cases ON emergency_cases(emergency_id);
+
+-- 联防小区（主疫区/周边支援小区，各带风险等级与一张应急工单）
+CREATE TABLE IF NOT EXISTS emergency_communities (
+  id BIGSERIAL PRIMARY KEY,
+  emergency_id BIGINT NOT NULL REFERENCES emergency_responses(id) ON DELETE CASCADE,
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  role TEXT NOT NULL DEFAULT 'affected',             -- affected 主疫区|surrounding 周边联防
+  risk_level TEXT NOT NULL DEFAULT 'warning',
+  risk_reason TEXT NOT NULL DEFAULT '',
+  work_order_id BIGINT REFERENCES work_orders(id),
+  complaints_at_start INT NOT NULL DEFAULT 0,
+  UNIQUE(emergency_id, community_id)
+);
+CREATE INDEX IF NOT EXISTS idx_emerg_comm ON emergency_communities(emergency_id);
+
+-- 重点积水点快照（楼顶水箱/地下车库/绿化带/雨水井/建筑工地等，关联病例轨迹）
+CREATE TABLE IF NOT EXISTS emergency_water_points (
+  id BIGSERIAL PRIMARY KEY,
+  emergency_id BIGINT NOT NULL REFERENCES emergency_responses(id) ON DELETE CASCADE,
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  water_point_id BIGINT REFERENCES water_points(id),
+  wp_type TEXT NOT NULL DEFAULT '',
+  location_desc TEXT NOT NULL DEFAULT '',
+  link_reason TEXT NOT NULL DEFAULT '',              -- 与病例轨迹/风险的关联说明
+  status_snapshot TEXT NOT NULL DEFAULT '',
+  is_key BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_emerg_wp ON emergency_water_points(emergency_id, community_id);
+
+-- 跨小区联防调度（消杀队/药剂/网格/物业/卫监/跨队支援）
+CREATE TABLE IF NOT EXISTS emergency_dispatch (
+  id BIGSERIAL PRIMARY KEY,
+  emergency_id BIGINT NOT NULL REFERENCES emergency_responses(id) ON DELETE CASCADE,
+  from_community_id BIGINT REFERENCES communities(id), -- 支援方小区（跨小区支援时）
+  to_community_id BIGINT NOT NULL REFERENCES communities(id),
+  team_id BIGINT REFERENCES teams(id),
+  resource_type TEXT NOT NULL DEFAULT 'team',        -- team|chemical|grid|property|supervisor
+  resource_ref TEXT NOT NULL DEFAULT '',             -- 药剂名/人员说明
+  amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+  action TEXT NOT NULL DEFAULT '',
+  created_by BIGINT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_emerg_dispatch ON emergency_dispatch(emergency_id);
+
+-- 每日汇总（风险解除前：投诉变化/积水点清零/药剂消耗/整改责任）
+CREATE TABLE IF NOT EXISTS emergency_daily_summaries (
+  id BIGSERIAL PRIMARY KEY,
+  emergency_id BIGINT NOT NULL REFERENCES emergency_responses(id) ON DELETE CASCADE,
+  community_id BIGINT REFERENCES communities(id),     -- NULL 表示全响应汇总
+  summary_date DATE NOT NULL,
+  new_complaints INT NOT NULL DEFAULT 0,
+  open_water_points INT NOT NULL DEFAULT 0,
+  cleared_water_points INT NOT NULL DEFAULT 0,
+  chemical_used DOUBLE PRECISION NOT NULL DEFAULT 0,
+  treatments INT NOT NULL DEFAULT 0,
+  rect_open INT NOT NULL DEFAULT 0,
+  rect_overdue INT NOT NULL DEFAULT 0,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(emergency_id, community_id, summary_date)
+);
+CREATE INDEX IF NOT EXISTS idx_emerg_daily ON emergency_daily_summaries(emergency_id, summary_date);
 `

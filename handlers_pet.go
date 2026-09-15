@@ -467,5 +467,44 @@ func hCommunityArchive(c *Ctx) {
 		}
 	}
 	archive["recent_notifications"] = notes
+
+	// 重点风险期应急响应归档（含风险等级、处置结果，供街道考核/后续计划/追溯）
+	type emergArc struct {
+		EmergNo       string     `json:"emerg_no"`
+		Title         string     `json:"title"`
+		TriggerType   string     `json:"trigger_type"`
+		TriggerLabel  string     `json:"trigger_label"`
+		Disease       string     `json:"disease"`
+		Status        string     `json:"status"`
+		RiskLevel     string     `json:"risk_level"`
+		RecheckDays   int        `json:"recheck_interval_days"`
+		StartedAt     time.Time  `json:"started_at"`
+		ResolvedAt    *time.Time `json:"resolved_at"`
+		ResolveNote   string     `json:"resolve_note"`
+		CmpDelta      int        `json:"complaint_delta"`
+	}
+	emList := []emergArc{}
+	erows, err := db.Query(`SELECT e.emerg_no, e.title, e.trigger_type, e.disease, e.status, ec.risk_level,
+		e.recheck_interval_days, e.started_at, e.resolved_at, COALESCE(e.resolve_note,''),
+		(SELECT count(*) FROM reports WHERE community_id=$1) - ec.complaints_at_start
+		FROM emergency_responses e JOIN emergency_communities ec ON ec.emergency_id=e.id
+		WHERE ec.community_id=$1 ORDER BY e.id DESC LIMIT 20`, id)
+	if err == nil {
+		defer erows.Close()
+		for erows.Next() {
+			var x emergArc
+			erows.Scan(&x.EmergNo, &x.Title, &x.TriggerType, &x.Disease, &x.Status, &x.RiskLevel,
+				&x.RecheckDays, &x.StartedAt, &x.ResolvedAt, &x.ResolveNote, &x.CmpDelta)
+			x.TriggerLabel = labelOf(EmergTriggerLabels, x.TriggerType)
+			emList = append(emList, x)
+		}
+	}
+	archive["emergencies"] = emList
+	var riskLevel, riskReason string
+	db.QueryRow(`SELECT risk_level, risk_reason FROM communities WHERE id=$1`, id).Scan(&riskLevel, &riskReason)
+	archive["risk_level"] = riskLevel
+	archive["risk_level_label"] = labelOf(CommunityRiskLabels, riskLevel)
+	archive["risk_reason"] = riskReason
+
 	jsonOK(c.W, archive)
 }
