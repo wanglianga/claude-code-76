@@ -151,6 +151,8 @@ func hClosedLoopDashboard(c *Ctx) {
 		PropRectOpen       int     `json:"prop_rect_open"`
 		PropRectOverdue    int     `json:"prop_rect_overdue"`
 		PropRectVerified   int     `json:"prop_rect_verified"`
+		PropRectCmpBefore  int     `json:"prop_rect_complaints_before"`
+		PropRectCmpAfter   int     `json:"prop_rect_complaints_after"`
 		OrdersClosed       int     `json:"orders_closed"`
 		CloseRate          float64 `json:"close_rate"`
 		KeyWaterPoints     int     `json:"key_water_points"`
@@ -175,6 +177,8 @@ func hClosedLoopDashboard(c *Ctx) {
 		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status != 'verified'),
 		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status != 'verified' AND pr.recheck_date < current_date),
 		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='verified'),
+		  (SELECT COALESCE(sum(pr.complaints_before),0) FROM property_rectifications pr WHERE pr.community_id=cm.id),
+		  (SELECT COALESCE(sum(pr.complaints_after),0) FROM property_rectifications pr WHERE pr.community_id=cm.id),
 		  (SELECT count(*) FROM work_orders o WHERE o.community_id=cm.id AND o.status='closed'),
 		  (SELECT count(*) FROM water_points w WHERE w.community_id=cm.id AND w.is_key AND w.status != 'cleared'),
 		  (SELECT count(*) FROM water_points w WHERE w.community_id=cm.id AND w.status != 'cleared'),
@@ -193,6 +197,7 @@ func hClosedLoopDashboard(c *Ctx) {
 			&r.OrdersTotal, &r.OrdersActive, &r.OrdersTreated, &r.OrdersRechecked, &r.RecheckPass,
 			&r.RecheckOverdue, &r.RectOpen, &r.RectVerified,
 			&r.PropRectTotal, &r.PropRectOpen, &r.PropRectOverdue, &r.PropRectVerified,
+			&r.PropRectCmpBefore, &r.PropRectCmpAfter,
 			&r.OrdersClosed,
 			&r.KeyWaterPoints, &r.OpenWaterPoints, &r.ComplaintsThisMonth, &r.ComplaintsLastMonth); err != nil {
 			jsonErr(c.W, 500, err.Error())

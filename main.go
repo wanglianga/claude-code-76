@@ -45,6 +45,8 @@ func main() {
 	if cfg.SeedDemo {
 		seed()
 	}
+	// 历史物业积水整改任务按统一的“同一积水点”口径可追溯补齐投诉基线/当前数
+	backfillPropRectComplaints()
 
 	registerAuthRoutes()
 	registerReportRoutes()

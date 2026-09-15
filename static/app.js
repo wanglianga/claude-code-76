@@ -931,7 +931,7 @@ async function renderLoop(el) {
   el.innerHTML = `
   ${rp ? `<div class="banner danger">⚠️「${esc(rp.name)}」生效中：复查间隔 ${data.recheck_interval_days} 天，重点积水点加密复查。</div>` : ''}
   <div class="card"><h3>各小区「投诉 → 派单 → 消杀 → 复查 → 整改 → 闭环」进度</h3><div class="table-wrap"><table>
-    <tr><th>小区</th><th>投诉</th><th>待派单</th><th>工单</th><th>已消杀</th><th>已复查</th><th>复查通过</th><th>复查逾期</th><th>整改中</th><th>整改已核验</th><th>积水整改</th><th>整改超期</th><th>积水已复查</th><th>已闭环</th><th>闭环率</th><th>重点积水点</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th></tr>
+    <tr><th>小区</th><th>投诉</th><th>待派单</th><th>工单</th><th>已消杀</th><th>已复查</th><th>复查通过</th><th>复查逾期</th><th>整改中</th><th>整改已核验</th><th>积水整改</th><th>整改超期</th><th>积水已复查</th><th>整改投诉(同点前→后)</th><th>已闭环</th><th>闭环率</th><th>重点积水点</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th></tr>
     ${data.rows.map(r => `<tr>
       <td><b>${esc(r.community_name)}</b></td><td>${r.reports_total}</td><td>${r.reports_pending}</td>
       <td>${r.orders_total}</td><td>${r.orders_treated}</td><td>${r.orders_rechecked}</td>
@@ -940,6 +940,7 @@ async function renderLoop(el) {
       <td>${r.prop_rect_open || 0}</td>
       <td>${r.prop_rect_overdue ? badge(r.prop_rect_overdue + ' 单', 'b-red') : 0}</td>
       <td>${r.prop_rect_verified || 0}</td>
+      <td>${(r.prop_rect_complaints_before || 0)} → ${(r.prop_rect_complaints_after || 0)}</td>
       <td>${r.orders_closed}</td><td><b>${r.close_rate.toFixed(0)}%</b></td>
       <td>${r.key_water_points ? badge(r.key_water_points + ' 处', 'b-red') : 0}</td>
       <td>${r.complaints_this_month}</td><td>${r.complaints_last_month}</td>

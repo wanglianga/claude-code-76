@@ -442,15 +442,34 @@ check("督办记录保留", any(m["kind"] == "supervise" for m in p1["reminders"
 s, r = call("GET", "/api/water-points?type=underground_garage", toks["street"])
 check("复查通过后积水点清除", any(w["location_desc"] == "地下车库 B2 集水井" and w["status"] == "cleared" for w in r["data"]))
 
-# 15.3 种子②：复查超期提示街道督办与物业负责人 → 复查
+# 15.3 种子②：复查超期提示街道督办与物业负责人 → 复查；并验收 A/B 投诉归因隔离
 s, r = call("GET", f"/api/property-rectifications/{pr2['id']}", toks["street"])
 check("复查超期自动生成提示", any(m["kind"] == "recheck_overdue" for m in r["data"]["reminders"]))
+# 滨江 A 区任务基线只含 A 区投诉（1 起），同小区 B 区投诉不得计入
+check("A任务基线仅计A点（=1），不含B区", r["data"]["complaints_before"] == 1, f"(before={r['data']['complaints_before']})")
 s, r = call("POST", f"/api/property-rectifications/{pr2['id']}/complete", toks["property2"], {
     "repair_desc": "x", "repair_method": "dredge_drain", "rectify_photos": ["https://x/1.jpg"], "rectify_photo_remark": "x"})
 check("待复查状态不可重复提交整改(409)", s == 409)
+# 复查窗口内本就存在 B 区投诉（种子 -4 天，晚于 A 建档 -9 天）：不得计入 A
 s, r = call("POST", f"/api/property-rectifications/{pr2['id']}/recheck", toks["street"], {
     "pass": True, "recheck_photos": ["https://example.com/pr2-recheck.jpg"], "recheck_remark": "街道按图核验通过"})
 check("街道复查通过（复查超期任务）", s == 200)
+check("复查时A任务当前投诉仍只计A点（=0，B区不计入）", r["data"]["complaints_after"] == 0, f"(after={r['data']['complaints_after']})")
+# 复查后再新增一起 B 区投诉：A 任务投诉变化必须冻结不变
+s, _ = call("POST", "/api/reports", toks["property2"], {
+    "type": "basement_damp", "location_desc": "地下车库 B 区排水沟", "nearby_population": "车主", "has_pets": False,
+    "description": "复查通过后新增的B区投诉"})
+check("复查后新增B区投诉成功", s == 200)
+s, r = call("GET", f"/api/property-rectifications/{pr2['id']}", toks["street"])
+check("复查后新增B投诉不改变A任务投诉变化（冻结 1→0）",
+      r["data"]["complaints_before"] == 1 and r["data"]["complaints_after"] == 0 and r["data"]["complaint_decreased"] is True)
+# 同小区阳光的 C 区干扰投诉不得计入 B2/B1（pr1: 2→1，pr3: 2→0）
+s, r = call("GET", f"/api/property-rectifications/{pr1['id']}", toks["street"])
+check("B2任务投诉 2→1（不含B1/C区）", r["data"]["complaints_before"] == 2 and r["data"]["complaints_after"] == 1,
+      f"({r['data']['complaints_before']}→{r['data']['complaints_after']})")
+s, r = call("GET", f"/api/property-rectifications/{pr3['id']}", toks["street"])
+check("B1任务投诉 2→0（复查后新增B1投诉被冻结，不含C区）",
+      r["data"]["complaints_before"] == 2 and r["data"]["complaints_after"] == 0)
 
 # 15.4 看板：超期清零、设施责任人维度入考核
 s, r = call("GET", "/api/dashboard/closed-loop", toks["street"])
@@ -462,6 +481,13 @@ fac = [f for f in r["data"]["facilities"] if f["user_name"] in ("王强", "赵�
 check("考核含物业设施责任人维度", len(fac) == 2)
 wq = next(f for f in fac if f["user_name"] == "王强")
 check("设施责任人复查合格率与投诉变化入考核", wq["rect_verified"] >= 2 and wq["recheck_pass_rate"] == 100.0 and wq["rect_overdue"] == 0)
+zm = next(f for f in fac if f["user_name"] == "赵敏")
+check("A任务投诉变化冻结入考核（1→0，复查后新增B不影响）", zm["complaints_before"] == 1 and zm["complaints_after"] == 0 and zm["complaint_delta"] == -1,
+      f"({zm['complaints_before']}→{zm['complaints_after']})")
+# 闭环看板同点归因汇总：阳光 B2(2→1)+B1(2→0)=4→1；滨江 A(1→0)，B 不计
+check("闭环看板同点投诉前→后（阳光4→1）", rowmap["阳光小区"]["prop_rect_complaints_before"] == 4 and rowmap["阳光小区"]["prop_rect_complaints_after"] == 1,
+      f"({rowmap['阳光小区']['prop_rect_complaints_before']}→{rowmap['阳光小区']['prop_rect_complaints_after']})")
+check("闭环看板滨江仅计A点（1→0，B点不计）", rowmap["滨江花园"]["prop_rect_complaints_before"] == 1 and rowmap["滨江花园"]["prop_rect_complaints_after"] == 0)
 
 # 15.5 消杀队重复临时处理 → 自动生成物业整改
 chem = call("GET", "/api/chemicals", toks["operator"])[1]["data"][0]

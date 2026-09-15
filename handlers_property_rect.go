@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -183,13 +184,164 @@ func ensureOverdueReminders(p *PropRect) {
 	}
 }
 
-// refreshComplaintCounts 复查时回写整改后同位置居民投诉数
-func refreshComplaintCounts(p *PropRect) {
-	db.QueryRow(`SELECT count(*) FROM reports
-		WHERE community_id=$1 AND type IN ('basement_damp','underground_garage') AND created_at > $2`,
-		p.CommunityID, p.CreatedAt).Scan(&p.ComplaintsAfter)
-	db.Exec(`UPDATE property_rectifications SET complaints_after=$1 WHERE id=$2`, p.ComplaintsAfter, p.ID)
+// ---- 居民投诉变化归因（必须归因到同一积水点） ----
+//
+// 口径（任务详情 / 闭环看板 / 设施责任人考核共用同一份结果，落库到 complaints_before/after）：
+//  1. 优先按关联 water_point_id 归因：经 water_points.report_id 反向找到产生该积水点的投诉；
+//  2. 否则按“标准化位置”匹配同一积水点（小写化并去除空白/标点后的等值，或带唯一标识的包含匹配）；
+//  3. 只统计地下室/车库类投诉（basement_damp / underground_garage）。
+// 因此同小区 A、B 两处各有投诉时，A 任务只计 A；复查后新增的 B 投诉不会改变 A。
+//
+// 基线窗口 = (建档时间-60天, 建档时间]；当前窗口 = (建档时间, 复查时间]，复查后冻结，
+// 之后新增的任何投诉（含同位置）都不再改变已落库的投诉变化，保证可追溯。
+
+// normWaterLoc 与数据库 norm_water_loc(s) 保持同一口径
+func normWaterLoc(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		switch r {
+		case ' ', '\t', '\n', '\r', '　', ',', '，', '.', '。', '、', ';', '；', ':', '：',
+			'/', '\\', '(', ')', '（', '）', '-', '—', '_':
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
+
+// locSamePoint 判断两个位置文本是否指向同一积水点。
+// 标准化后等值直接成立；包含匹配仅允许“带数字/字母等唯一标识”的较短串，避免 A区/B区 或泛称互相误匹配。
+func locSamePoint(a, b string) bool {
+	x, y := normWaterLoc(a), normWaterLoc(b)
+	if x == "" || y == "" {
+		return false
+	}
+	if x == y {
+		return true
+	}
+	short, long := x, y
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	hasAlnum := false
+	for _, r := range short {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') {
+			hasAlnum = true
+			break
+		}
+	}
+	return hasAlnum && len([]rune(short)) >= 3 && strings.Contains(long, short)
+}
+
+// attributedComplaintReportIDs 返回时间窗内归因到该积水点的地下室类投诉 ID 集合
+func attributedComplaintReportIDs(commID int64, wpID *int64, waterLoc string, since, until time.Time) map[int64]bool {
+	out := map[int64]bool{}
+	rows, err := db.Query(`SELECT r.id, r.location_desc
+		FROM reports r
+		WHERE r.community_id=$1 AND r.type IN ('basement_damp','underground_garage')
+		  AND r.created_at > $2 AND r.created_at <= $3`, commID, since, until)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+
+	// 该积水点直接关联的投诉（water_points.report_id）
+	linked := map[int64]bool{}
+	if wpID != nil {
+		lrows, lerr := db.Query(`SELECT report_id FROM water_points WHERE id=$1 AND report_id IS NOT NULL`, *wpID)
+		if lerr == nil {
+			defer lrows.Close()
+			for lrows.Next() {
+				var rid sql.NullInt64
+				lrows.Scan(&rid)
+				if rid.Valid {
+					linked[rid.Int64] = true
+				}
+			}
+		}
+	}
+	for rows.Next() {
+		var rid int64
+		var loc string
+		rows.Scan(&rid, &loc)
+		if linked[rid] || locSamePoint(loc, waterLoc) {
+			out[rid] = true
+		}
+	}
+	return out
+}
+
+func countAttributedComplaints(commID int64, wpID *int64, waterLoc string, since, until time.Time) int {
+	return len(attributedComplaintReportIDs(commID, wpID, waterLoc, since, until))
+}
+
+func nullIDToPtr(v sql.NullInt64) *int64 {
+	if v.Valid {
+		id := v.Int64
+		return &id
+	}
+	return nil
+}
+
+// baselineWindow / currentWindow 统一窗口
+func baselineWindow(createdAt time.Time) (time.Time, time.Time) {
+	return createdAt.AddDate(0, 0, -60), createdAt
+}
+
+// setComplaintBaseline 建档时写入同积水点投诉基线
+func setComplaintBaseline(p *PropRect) {
+	since, until := baselineWindow(p.CreatedAt)
+	n := countAttributedComplaints(p.CommunityID, p.WaterPointID, p.WaterLocation, since, until)
+	db.Exec(`UPDATE property_rectifications SET complaints_before=$1 WHERE id=$2`, n, p.ID)
+	p.ComplaintsBefore = n
+}
+
+// refreshComplaintCounts 复查时写入“同积水点、建档至复查之间”的当前投诉数（复查后冻结）
+func refreshComplaintCounts(p *PropRect) {
+	until := time.Now()
+	if p.RecheckedAt != nil {
+		until = *p.RecheckedAt
+	}
+	n := countAttributedComplaints(p.CommunityID, p.WaterPointID, p.WaterLocation, p.CreatedAt, until)
+	db.Exec(`UPDATE property_rectifications SET complaints_after=$1 WHERE id=$2`, n, p.ID)
+	p.ComplaintsAfter = n
+}
+
+// backfillPropRectComplaints 历史任务按同一可追溯口径补齐基线/当前投诉数
+func backfillPropRectComplaints() {
+	rows, err := db.Query(`SELECT id, community_id, water_point_id, water_location, created_at, rechecked_at
+		FROM property_rectifications`)
+	if err != nil {
+		return
+	}
+	type row struct {
+		id, commID  int64
+		wpID        sql.NullInt64
+		loc         string
+		createdAt   time.Time
+		recheckedAt sql.NullTime
+	}
+	var rs []row
+	for rows.Next() {
+		var x row
+		if rows.Scan(&x.id, &x.commID, &x.wpID, &x.loc, &x.createdAt, &x.recheckedAt) != nil {
+			continue
+		}
+		rs = append(rs, x)
+	}
+	rows.Close()
+	for _, x := range rs {
+		bSince, bUntil := baselineWindow(x.createdAt)
+		wpPtr := nullIDToPtr(x.wpID)
+		before := countAttributedComplaints(x.commID, wpPtr, x.loc, bSince, bUntil)
+		db.Exec(`UPDATE property_rectifications SET complaints_before=$1 WHERE id=$2`, before, x.id)
+		if x.recheckedAt.Valid {
+			after := countAttributedComplaints(x.commID, wpPtr, x.loc, x.createdAt, x.recheckedAt.Time)
+			db.Exec(`UPDATE property_rectifications SET complaints_after=$1 WHERE id=$2`, after, x.id)
+		}
+	}
+}
+
 
 // canViewPropRect 只读权限
 func canViewPropRect(u *SessionUser, p *PropRect) bool {
@@ -253,10 +405,6 @@ func maybeCreatePropertyRect(orderID int64, actor *SessionUser) {
 		return
 	}
 
-	var complaintsBefore int
-	db.QueryRow(`SELECT count(*) FROM reports WHERE community_id=$1 AND type IN ('basement_damp','underground_garage')
-		AND created_at > now() - interval '60 days'`, commID).Scan(&complaintsBefore)
-
 	recheckDate := time.Now().AddDate(0, 0, defaultRectDays)
 	var id int64
 	err = db.QueryRow(`INSERT INTO property_rectifications
@@ -266,11 +414,15 @@ func maybeCreatePropertyRect(orderID int64, actor *SessionUser) {
 		VALUES($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,'pending',$12) RETURNING id`,
 		orderID, wpID, commID, wpLoc, wpType,
 		actor.ID, "消杀队临时抽排/投药，抑制蚊幼虫（排水沟长期积水需物业工程维修）", treatCount,
-		facilityID, recheckDate, complaintsBefore, actor.ID).Scan(&id)
+		facilityID, recheckDate, 0, actor.ID).Scan(&id)
 	if err != nil {
 		return
 	}
 	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, id)
+	// 同积水点投诉基线（按 water_point_id / 标准化位置归因）
+	if p, e := scanPropRect(db.QueryRow(propRectSelect+` WHERE r.id=$1`, id)); e == nil {
+		setComplaintBaseline(p)
+	}
 	ensureParty(orderID, "property", &facilityID, "积水整改设施责任人")
 	db.Exec(`UPDATE water_points SET status='rectifying' WHERE id=$1`, wpID.Int64)
 	addLog(orderID, actor, "生成物业整改任务",
@@ -449,9 +601,6 @@ func hCreatePropRectFromOrder(c *Ctx) {
 	if recheckDate == "" {
 		recheckDate = time.Now().AddDate(0, 0, defaultRectDays).Format("2006-01-02")
 	}
-	var complaintsBefore int
-	db.QueryRow(`SELECT count(*) FROM reports WHERE community_id=$1 AND type IN ('basement_damp','underground_garage')
-		AND created_at > now() - interval '60 days'`, commID).Scan(&complaintsBefore)
 
 	var id int64
 	err = db.QueryRow(`INSERT INTO property_rectifications
@@ -461,12 +610,15 @@ func hCreatePropRectFromOrder(c *Ctx) {
 		VALUES($1,$2,$3,$4,$5,$6,$7,now(),$8,$9,$10,$11,$12,'pending',$13) RETURNING id`,
 		orderID, wpID, commID, wpLoc, wpType,
 		c.User.ID, "消杀队临时抽排/投药，抑制蚊幼虫（排水沟长期积水需物业工程维修）", treatCount,
-		facilityID, recheckDate, req.RepairDesc, complaintsBefore, c.User.ID).Scan(&id)
+		facilityID, recheckDate, req.RepairDesc, 0, c.User.ID).Scan(&id)
 	if err != nil {
 		jsonErr(c.W, 500, err.Error())
 		return
 	}
 	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, id)
+	if p, e := scanPropRect(db.QueryRow(propRectSelect+` WHERE r.id=$1`, id)); e == nil {
+		setComplaintBaseline(p)
+	}
 	ensureParty(orderID, "property", &facilityID, "积水整改设施责任人")
 	db.Exec(`UPDATE water_points SET status='rectifying' WHERE id=$1`, wpID.Int64)
 	addLog(orderID, c.User, "转物业整改", fmt.Sprintf("地下室排水沟长期积水，临时处理 %d 次未根治，下发物业整改任务 #%d，复查日期 %s", treatCount, id, recheckDate))
@@ -539,20 +691,20 @@ func hCreatePropRect(c *Ctx) {
 	if req.RecheckDate == "" {
 		req.RecheckDate = time.Now().AddDate(0, 0, defaultRectDays).Format("2006-01-02")
 	}
-	var complaintsBefore int
-	db.QueryRow(`SELECT count(*) FROM reports WHERE community_id=$1 AND type IN ('basement_damp','underground_garage')
-		AND created_at > now() - interval '60 days'`, req.CommunityID).Scan(&complaintsBefore)
 	var id int64
 	err = db.QueryRow(`INSERT INTO property_rectifications
 		(work_order_id, water_point_id, community_id, water_location, water_type,
 		 facility_user_id, recheck_date, repair_desc, complaints_before, status, created_by)
 		VALUES(NULL,$1,$2,$3,$4,$5,$6,$7,$8,'pending',$9) RETURNING id`,
-		wpID, req.CommunityID, req.WaterLocation, wpType, facilityID, req.RecheckDate, req.RepairDesc, complaintsBefore, c.User.ID).Scan(&id)
+		wpID, req.CommunityID, req.WaterLocation, wpType, facilityID, req.RecheckDate, req.RepairDesc, 0, c.User.ID).Scan(&id)
 	if err != nil {
 		jsonErr(c.W, 500, err.Error())
 		return
 	}
 	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, id)
+	if p, e := scanPropRect(db.QueryRow(propRectSelect+` WHERE r.id=$1`, id)); e == nil {
+		setComplaintBaseline(p)
+	}
 	if wpID.Valid {
 		db.Exec(`UPDATE water_points SET status='rectifying' WHERE id=$1`, wpID.Int64)
 	}

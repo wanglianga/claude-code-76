@@ -230,13 +230,39 @@ func seed() {
 		log.Fatalf("seed yang basement point: %v", err)
 	}
 
+	// 同点投诉归因演示：同小区 A/B/C 多处地下室积水，各点投诉必须分别归因，互不串算。
+	// 插入后由启动回填 backfillPropRectComplaints 按 water_point_id/标准化位置统一计算基线与当前值。
+	baseComplaint := func(reporter string, comm int64, loc string, daysAgo int) {
+		var rid int64
+		if err := db.QueryRow(`INSERT INTO reports(report_no, reporter_id, community_id, type, location_desc, nearby_population, has_pets, description, status, created_at)
+			VALUES('',$1,$2,'basement_damp',$3,'车主',false,'地下室排水沟长期积水有异味蚊虫多','closed',$4) RETURNING id`,
+			userIDs[reporter], comm, loc, time.Now().AddDate(0, 0, -daysAgo)).Scan(&rid); err != nil {
+			log.Fatalf("seed basement complaint: %v", err)
+		}
+		db.Exec(`UPDATE reports SET report_no='RPT'||LPAD(id::text,8,'0') WHERE id=$1`, rid)
+	}
+	// 阳光小区 B2 集水井：建档(-6天) 前 2 起（-25/-9 天），建档后 1 起（-2 天，待复查时计入）
+	baseComplaint("resident", yang, "地下车库 B2 集水井", 25)
+	baseComplaint("grid", yang, "地下车库 B2 集水井", 9)
+	baseComplaint("resident", yang, "地下车库 B2 集水井", 2)
+	// 阳光小区 B1 排水沟：建档(-12) 前 2 起（-30/-13 天）；复查(-8) 后又新增 1 起（-3 天，应被冻结不计入）
+	baseComplaint("resident", yang, "地下车库 B1 排水沟", 30)
+	baseComplaint("property", yang, "地下车库 B1 排水沟", 13)
+	baseComplaint("resident", yang, "地下车库 B1 排水沟", 3)
+	// 阳光小区 C 区排水沟（干扰点，无整改任务）：同小区他点投诉，不得计入 B2/B1
+	baseComplaint("grid", yang, "地下车库 C 区排水沟", 10)
+	// 滨江花园 A 区排水沟：建档(-9) 前 1 起（-12 天）
+	baseComplaint("resident2", bin, "地下车库 A 区排水沟", 12)
+	// 滨江花园 B 区排水沟（干扰点）：建档后新增（-4 天），复查 A 任务时不得计入 A
+	baseComplaint("property2", bin, "地下车库 B 区排水沟", 4)
+
 	// ① 整改超期：阳光小区 B2 集水井，消杀队已临时处理 2 次，物业尚未完成（复查日期已过 3 天）
 	var pr1 int64
 	if err := db.QueryRow(`INSERT INTO property_rectifications
 		(work_order_id, water_point_id, community_id, water_location, water_type,
 		 temp_treated_by, temp_treatment, temp_treated_at, temp_treatment_times,
 		 facility_user_id, recheck_date, complaints_before, status, created_by, created_at)
-		VALUES(NULL,$1,$2,$3,'underground_garage',$4,$5,$6,2,$7,$8,1,'pending',$9,$10) RETURNING id`,
+		VALUES(NULL,$1,$2,$3,'underground_garage',$4,$5,$6,2,$7,$8,0,'pending',$9,$10) RETURNING id`,
 		b2id.id, yang, b2id.loc,
 		userIDs["operator"], "消杀队临时抽排+投药灭孑孓，排水沟长期返水需物业工程维修", time.Now().AddDate(0, 0, -6),
 		userIDs["property"], time.Now().AddDate(0, 0, -3), userIDs["operator"], time.Now().AddDate(0, 0, -6)).Scan(&pr1); err != nil {
@@ -252,7 +278,7 @@ func seed() {
 		 facility_user_id, recheck_date, repair_desc, repair_method, rectify_photos, rectify_photo_remark,
 		 rectified_by, rectified_at, complaints_before, status, created_by, created_at)
 		VALUES($1,$2,$3,'basement_damp',$4,$5,$6,2,$7,$8,
-		 $9,'dredge_drain',$10::jsonb,$11,$12,$13,1,'recheck_pending',$4,$14) RETURNING id`,
+		 $9,'dredge_drain',$10::jsonb,$11,$12,$13,0,'recheck_pending',$4,$14) RETURNING id`,
 		binBaseID, bin, "地下车库 A 区排水沟",
 		userIDs["operator2"], "临时抽排积水并投药", time.Now().AddDate(0, 0, -9),
 		userIDs["property2"], time.Now().AddDate(0, 0, -2),
