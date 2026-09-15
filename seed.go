@@ -64,6 +64,7 @@ func seed() {
 		{"street", "Street@123", "周主任", "street", "13800000008", nil, nil},
 		{"supervisor", "Supervisor@123", "吴监督", "supervisor", "13800000009", nil, nil},
 		{"kindergarten", "Kindergarten@123", "王园", "kindergarten", "13911110001", &yang, nil},
+		{"kindergarten2", "Kindergarten@123", "李园长", "kindergarten", "13911110002", &bin, nil},
 	}
 	userIDs := map[string]int64{}
 	for _, x := range users {
@@ -192,7 +193,7 @@ func seed() {
 	}
 	zones := []cz{
 		{yang, "阳光幼儿园旁绿化带", "kindergarten", "王园", "13911110001", "kindergarten", "07:30-08:30,11:30-13:30,16:00-18:00", "阳光幼儿园家长一群"},
-		{bin, "滨江儿童乐园", "playground", "李园长", "13911110002", "", "08:00-10:00,15:00-18:30", "滨江乐园家长群"},
+		{bin, "滨江儿童乐园", "playground", "李园长", "13911110002", "kindergarten2", "08:00-10:00,15:00-18:30", "滨江乐园家长群"},
 	}
 	for _, z := range zones {
 		var contactUID *int64

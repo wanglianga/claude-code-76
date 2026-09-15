@@ -274,5 +274,60 @@ check("绑定园方可更新送达", s == 200)
 s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])
 check("三类提醒全部送达", all(x["delivery_status"] == "delivered" for x in r["data"]["reminders"]))
 
+print("== 13. 园方确认绑定门禁（未绑定/非绑定均 4xx 且无副作用） ==")
+toks["kindergarten2"] = login("kindergarten2", "Kindergarten@123")
+check("第二园方账号登录", bool(toks["kindergarten2"]))
+# 街道创建未绑定联系人的活动区
+s, r = call("POST", "/api/child-zones", toks["street"], {
+    "community_id": 1, "name": "未绑定联系人活动区", "zone_type": "playground",
+    "contact_name": "临时联系人", "contact_phone": "13000000000",
+    "activity_times": "08:00-10:00", "parent_group": "临时家长群"})
+check("创建未绑定联系人活动区", s == 200)
+unbound_zone = r["data"]["id"]
+# 新工单载体：上报→派单→取一单
+call("POST", "/api/reports", toks["resident"], {"type": "mosquito_dense", "location_desc": "13号楼周边", "nearby_population": "居民", "has_pets": False})
+call("POST", "/api/dispatch/generate", toks["street"], {"date": datetime.now().strftime("%Y-%m-%d")})
+oid3 = call("GET", "/api/work-orders?status=assigned", toks["operator"])[1]["data"][0]["id"]
+# 计划A=未绑定活动区；计划B=王园绑定活动区；挂同一工单
+s, r = call("POST", "/api/child-zone-plans", toks["street"], {
+    "child_zone_id": unbound_zone, "work_order_id": oid3, "planned_start": dt(20), "planned_end": dt(21),
+    "wind_direction": "东风", "safety_interval_hours": 2})
+planA = r["data"]["id"]
+s, r = call("POST", "/api/child-zone-plans", toks["street"], {
+    "child_zone_id": zone["id"], "work_order_id": oid3, "planned_start": dt(21, 30), "planned_end": dt(22, 30),
+    "wind_direction": "南风", "safety_interval_hours": 2})
+planB = r["data"]["id"]
+call("POST", f"/api/work-orders/{oid3}/start", toks["operator"], {})
+chem = call("GET", "/api/chemicals", toks["operator"])[1]["data"][0]
+call("POST", f"/api/work-orders/{oid3}/treatments", toks["operator"], {
+    "chemical_id": chem["id"], "concentration": "1:100", "spray_area": "13号楼及周边", "chemical_used": 1.0,
+    "warning_sign": True, "resident_notified": True, "pet_avoided": True})
+for p in (planA, planB):
+    call("POST", f"/api/child-zone-plans/{p}/remove-warning", toks["operator"], {})
+stA = call("GET", f"/api/child-zone-plans/{planA}", toks["street"])[1]["data"]["plan"]["status"]
+stB = call("GET", f"/api/child-zone-plans/{planB}", toks["street"])[1]["data"]["plan"]["status"]
+check("两计划均推进到警示已撤除", stA == "warning_removed" and stB == "warning_removed")
+# 未绑定：任意 kindergarten 确认 → 4xx，且无副作用
+s, r = call("POST", f"/api/child-zone-plans/{planA}/confirm", toks["kindergarten"], {"note": "试图确认"})
+check("未绑定活动区确认返回4xx", 400 <= s < 500, f"(HTTP {s})")
+pA = call("GET", f"/api/child-zone-plans/{planA}", toks["street"])[1]["data"]["plan"]
+check("计划状态保持 warning_removed 且确认字段为空", pA["status"] == "warning_removed" and not pA["confirmed_at"] and not pA["confirmed_by"])
+s, r = call("GET", "/api/notifications", toks["street"])
+check("无公开恢复通知", not any("未绑定联系人活动区" in (n["title"] or "") + (n["content"] or "") for n in r["data"]))
+logs3 = call("GET", "/api/work-orders/" + str(oid3), toks["street"])[1]["data"]["logs"]
+check("工单无园方确认日志", not any(l["action"] == "园方确认" for l in logs3))
+# 非绑定账号：李园长确认王园的计划 → 4xx
+s, r = call("POST", f"/api/child-zone-plans/{planB}/confirm", toks["kindergarten2"], {"note": "越权确认"})
+check("非绑定园方账号确认返回4xx", 400 <= s < 500, f"(HTTP {s})")
+pB = call("GET", f"/api/child-zone-plans/{planB}", toks["street"])[1]["data"]["plan"]
+check("计划B状态未被改变", pB["status"] == "warning_removed" and not pB["confirmed_at"])
+# 绑定园方确认自身计划 → 成功并发布恢复通知
+s, r = call("POST", f"/api/child-zone-plans/{planB}/confirm", toks["kindergarten"], {"note": "确认恢复"})
+check("绑定园方确认成功", s == 200)
+pB = call("GET", f"/api/child-zone-plans/{planB}", toks["street"])[1]["data"]["plan"]
+check("计划B已确认且确认字段已写入", pB["status"] == "confirmed" and pB["confirmed_at"] and pB["confirmed_by"])
+s, r = call("GET", "/api/notifications", toks["resident"])
+check("居民收到该计划恢复通知", any("阳光幼儿园" in (n["title"] or "") and "恢复时间" in (n["content"] or "") for n in r["data"]))
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

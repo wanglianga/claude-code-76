@@ -561,9 +561,13 @@ func hConfirmPlan(c *Ctx) {
 		jsonErr(c.W, 409, "需先完成作业并撤除警示后才能确认（当前："+labelOf(PlanStatusLabels, status)+"）")
 		return
 	}
-	// 仅本活动区园方联系人可确认
-	if ownerID != nil && *ownerID != c.User.ID {
-		jsonErr(c.W, 403, "仅该活动区园方联系人可确认")
+	// 确认前必须存在绑定的园方联系人账号，且为当前登录园方；否则一律 4xx，不做任何状态变更
+	if ownerID == nil {
+		jsonErr(c.W, 409, "该活动区未绑定园方联系人账号，无法确认")
+		return
+	}
+	if *ownerID != c.User.ID {
+		jsonErr(c.W, 403, "仅该活动区绑定的园方联系人可确认")
 		return
 	}
 	db.Exec(`UPDATE child_zone_plans SET status='confirmed', confirmed_by=$1, confirmed_at=now(), confirm_note=$2 WHERE id=$3`,
