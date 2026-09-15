@@ -85,7 +85,7 @@ async function doLogout() {
 /* ---------- 主框架 ---------- */
 const TABS = {
   resident: [
-    ['report', '上报问题'], ['reports', '我的上报'], ['zones', '儿童活动区'], ['notices', '居民告知'],
+    ['report', '上报问题'], ['reports', '我的上报'], ['pets', '宠物投诉'], ['zones', '儿童活动区'], ['notices', '居民告知'],
   ],
   property: [
     ['report', '上报问题'], ['rects', '整改任务'], ['orders', '小区工单'], ['notices', '居民告知'],
@@ -99,10 +99,10 @@ const TABS = {
   street: [
     ['dispatch', '派单中心'], ['orders', '工单总览'], ['points', '积水点'], ['keylist', '重点积水点'],
     ['chems', '药剂库存'], ['sched', '排班管理'], ['rainfall', '降雨记录'], ['risk', '重点风险期'],
-    ['zones', '错峰消杀'], ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
+    ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
   ],
   supervisor: [
-    ['orders', '工单总览'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
+    ['orders', '工单总览'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
   ],
   kindergarten: [
     ['zones', '消杀计划确认'], ['notices', '居民告知'],
@@ -251,6 +251,7 @@ async function renderDispatch(el) {
   const today = new Date().toISOString().slice(0, 10);
   el.innerHTML = `
   ${rp ? `<div class="banner danger">⚠️「${esc(rp.name)}」生效中，派单优先级 ×1.5，复查间隔 ${rp.recheck_interval_days} 天。</div>` : ''}
+  ${(data.pet_tracking || []).filter(t => t.total_complaints > 0).map(t => `<div class="banner">🐾 ${esc(t.community_name)}：宠物投诉 ${t.total_complaints} 起（待处理 ${t.pending_complaints}）${t.latest_adjustment ? '，最近告知调整「' + esc(t.latest_adjustment) + '」' + (t.decreased ? '，同类投诉已下降' : (t.decreased === false ? '，同类投诉未下降，请关注' : '')) : ''}，请纳入本次计划参考。</div>`).join('')}
   <div class="card"><h3>待派单池（按 小区 / 积水点类型 / 近期降雨 / 投诉密度 综合评分）</h3>
     <div class="filter-row">
       <label>计划消杀日期 <input type="date" id="dp-date" value="${today}"></label>
@@ -888,6 +889,167 @@ async function confirmPlan(planId) {
   });
 }
 
+/* ---------- 宠物误触投诉 ---------- */
+async function renderPets(el) {
+  const role = me.role;
+  if (role === 'resident') {
+    const list = await api('/api/pet-complaints');
+    el.innerHTML = `
+    <div class="card"><h3>宠物误触投诉（自动关联本小区最近一次消杀的药剂、喷洒区域与警示时间）</h3>
+      <div class="form-grid">
+        <div class="form-item"><label>宠物类型 *</label><select id="pc-type">${opts(meta.pet_types)}</select></div>
+        <div class="form-item"><label>宠物名字</label><input id="pc-name" placeholder="如：豆豆"></div>
+        <div class="form-item full"><label>不适症状 *</label><textarea id="pc-symptom" placeholder="如：喷药后呕吐、打喷嚏、精神萎靡"></textarea></div>
+        <div class="form-item full"><label>主人行走路线 *</label><input id="pc-route" placeholder="如：18:00 从 3 号楼沿中心花园遛狗至东门"></div>
+        <div class="form-item full"><label>宠物就医凭证链接（多个用英文逗号分隔）</label><input id="pc-vouchers" placeholder="https://example.com/vet1.jpg"></div>
+      </div>
+      <div class="btn-row"><button class="btn" onclick="submitPetComplaint()">提交投诉</button></div>
+    </div>
+    <div class="card"><h3>我的投诉</h3><div class="table-wrap"><table>
+      <tr><th>单号</th><th>宠物</th><th>症状</th><th>关联药剂</th><th>喷洒区域</th><th>警示时间</th><th>状态</th><th>处理结果</th><th>操作</th></tr>
+      ${list.map(p => `<tr>
+        <td>${esc(p.complaint_no)}</td><td>${esc(p.pet_type_label)}${p.pet_name ? '·' + esc(p.pet_name) : ''}</td>
+        <td>${esc(p.symptom)}</td><td>${esc(p.chemical_name || '-')}</td><td>${esc(p.spray_area || '-')}</td>
+        <td>${fmtT(p.warning_time)}</td><td>${sBadge(p.status, p.status_label)}</td>
+        <td>${p.status === 'resolved' ? `回访:${p.need_revisit ? '是' : '否'} 赔付:${p.compensation ? '是' : '否'}${p.notify_adjustment ? '<br>告知调整:' + esc(p.notify_adjustment) : ''}` : '-'}</td>
+        <td><button class="btn sm gray" onclick="openPet(${p.id})">详情</button></td>
+      </tr>`).join('') || '<tr><td colspan="9">暂无投诉</td></tr>'}
+    </table></div></div>`;
+    return;
+  }
+  // 街道 / 卫生监督
+  const list = await api('/api/pet-complaints');
+  const tracking = await api('/api/pet-complaints/tracking');
+  el.innerHTML = `
+  <div class="card"><h3>同类宠物投诉跟踪（告知方式调整后是否下降）</h3><div class="table-wrap"><table>
+    <tr><th>小区</th><th>投诉总数</th><th>待处理</th><th>最近告知调整</th><th>调整前(30天)</th><th>调整后(至今)</th><th>日均对比</th><th>是否下降</th></tr>
+    ${tracking.map(t => `<tr>
+      <td><b>${esc(t.community_name)}</b></td><td>${t.total_complaints}</td><td>${t.pending_complaints}</td>
+      <td>${t.latest_adjustment ? esc(t.latest_adjustment) + '<br><span style="font-size:11px;color:#90a4ae">' + fmtT(t.adjusted_at) + '</span>' : '-'}</td>
+      <td>${t.adjusted_at ? t.before_count : '-'}</td><td>${t.adjusted_at ? t.after_count : '-'}</td>
+      <td>${t.adjusted_at ? t.before_per_day.toFixed(2) + ' → ' + t.after_per_day.toFixed(2) : '-'}</td>
+      <td>${t.decreased === null || t.decreased === undefined ? '-' : (t.decreased ? badge('已下降', 'b-green') : badge('未下降', 'b-red'))}</td>
+    </tr>`).join('')}
+  </table></div></div>
+  <div class="card"><h3>宠物误触投诉处理</h3><div class="table-wrap"><table>
+    <tr><th>单号</th><th>小区</th><th>投诉人</th><th>宠物</th><th>症状</th><th>行走路线</th><th>关联药剂/区域/警示时间</th><th>就医凭证</th><th>状态</th><th>操作</th></tr>
+    ${list.map(p => `<tr>
+      <td>${esc(p.complaint_no)}</td><td>${esc(p.community_name)}</td><td>${esc(p.reporter_name)}</td>
+      <td>${esc(p.pet_type_label)}${p.pet_name ? '·' + esc(p.pet_name) : ''}</td><td>${esc(p.symptom)}</td>
+      <td>${esc(p.walking_route)}</td>
+      <td>${esc(p.chemical_name || '-')}<br>${esc(p.spray_area || '-')}<br><span style="font-size:11px;color:#90a4ae">${fmtT(p.warning_time)}</span></td>
+      <td>${(p.medical_vouchers || []).map(v => `<a href="${esc(v)}" target="_blank">凭证</a>`).join(' ') || '-'}</td>
+      <td>${sBadge(p.status, p.status_label)}</td>
+      <td>${p.status === 'pending' ? `<button class="btn sm orange" onclick="openHandlePet(${p.id})">办结</button>` : `<button class="btn sm gray" onclick="openPet(${p.id})">详情</button>`}</td>
+    </tr>`).join('') || '<tr><td colspan="10">暂无投诉</td></tr>'}
+  </table></div></div>`;
+}
+async function submitPetComplaint() {
+  await run(async () => {
+    const vouchers = val('pc-vouchers') ? val('pc-vouchers').split(',').map(s => s.trim()).filter(Boolean) : [];
+    await api('/api/pet-complaints', { method: 'POST', body: {
+      pet_type: val('pc-type'), pet_name: val('pc-name'), symptom: val('pc-symptom'),
+      walking_route: val('pc-route'), medical_vouchers: vouchers,
+    } });
+    toast('投诉已提交，已自动关联本小区最近一次消杀记录'); switchTab('pets');
+  });
+}
+async function openPet(id) {
+  document.getElementById('modal-mask').classList.remove('hidden');
+  document.getElementById('modal-body').innerHTML = '加载中...';
+  await run(async () => {
+    const p = await api('/api/pet-complaints/' + id);
+    document.getElementById('modal-body').innerHTML = `
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>宠物投诉 ${esc(p.complaint_no)} ${sBadge(p.status, p.status_label)}</h2>
+      <div class="sub">${esc(p.community_name)} ｜ 投诉人 ${esc(p.reporter_name)} ｜ ${fmtT(p.created_at)}</div>
+      <div class="kv">
+        <div><span class="k">宠物：</span>${esc(p.pet_type_label)}${p.pet_name ? '·' + esc(p.pet_name) : ''}</div>
+        <div><span class="k">症状：</span>${esc(p.symptom)}</div>
+        <div><span class="k">行走路线：</span>${esc(p.walking_route)}</div>
+        <div><span class="k">关联工单：</span>${esc(p.order_no || '-')}</div>
+        <div><span class="k">药剂：</span>${esc(p.chemical_name || '-')}</div>
+        <div><span class="k">喷洒区域：</span>${esc(p.spray_area || '-')}</div>
+        <div><span class="k">警示时间：</span>${fmtT(p.warning_time)}</div>
+        <div><span class="k">就医凭证：</span>${(p.medical_vouchers || []).map(v => `<a href="${esc(v)}" target="_blank">查看</a>`).join(' ') || '-'}</div>
+      </div>
+      ${p.status === 'resolved' ? `<div class="section"><h4>处理结果（${esc(p.handler_name || '')} ${fmtT(p.handled_at)}）</h4><div class="kv">
+        <div><span class="k">需要回访：</span>${p.need_revisit ? '是' : '否'}</div>
+        <div><span class="k">需要赔付：</span>${p.compensation ? '是' : '否'} ${esc(p.compensation_note || '')}</div>
+        <div><span class="k">药剂说明：</span>${esc(p.chemical_note || '-')}</div>
+        <div><span class="k">后续告知调整：</span>${esc(p.notify_adjustment || '-')}</div>
+        <div><span class="k">处理备注：</span>${esc(p.resolution_note || '-')}</div>
+      </div></div>` : ''}`;
+  });
+}
+async function openHandlePet(id) {
+  document.getElementById('modal-mask').classList.remove('hidden');
+  await run(async () => {
+    const p = await api('/api/pet-complaints/' + id);
+    document.getElementById('modal-body').innerHTML = `
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>办结宠物投诉 ${esc(p.complaint_no)}</h2>
+      <div class="sub">${esc(p.community_name)} ｜ ${esc(p.pet_type_label)}${p.pet_name ? '·' + esc(p.pet_name) : ''} ｜ 药剂 ${esc(p.chemical_name || '-')} ｜ 区域 ${esc(p.spray_area || '-')}</div>
+      <div class="form-grid">
+        <div class="form-item full"><div class="check-row">
+          <label><input type="checkbox" id="hp-revisit"> 需要回访</label>
+          <label><input type="checkbox" id="hp-comp"> 需要赔付</label>
+        </div></div>
+        <div class="form-item full"><label>赔付说明</label><input id="hp-compnote" placeholder="如：凭就医票据报销"></div>
+        <div class="form-item full"><label>药剂说明（成分/安全间隔/注意事项）</label><textarea id="hp-chemnote" placeholder="如：高效氯氟氰菊酯 1:100 稀释，安全间隔 4 小时，对猫科动物敏感"></textarea></div>
+        <div class="form-item full"><label>后续告知方式调整</label><textarea id="hp-adjust" placeholder="如：改为短信+公告栏双通道，提前 48 小时告知并标注宠物避让路线"></textarea></div>
+        <div class="form-item full"><label>处理备注</label><input id="hp-note" placeholder="处理过程与结论"></div>
+      </div>
+      <div class="btn-row"><button class="btn" onclick="handlePet(${p.id})">提交办结</button></div>`;
+  });
+}
+async function handlePet(id) {
+  await run(async () => {
+    const r = await api(`/api/pet-complaints/${id}/handle`, { method: 'POST', body: {
+      need_revisit: chk('hp-revisit'), compensation: chk('hp-comp'), compensation_note: val('hp-compnote'),
+      chemical_note: val('hp-chemnote'), notify_adjustment: val('hp-adjust'), resolution_note: val('hp-note'),
+    } });
+    toast(r.message); closeModal(); switchTab('pets');
+  });
+}
+
+/* ---------- 小区消杀档案 ---------- */
+async function renderArchive(el) {
+  el.innerHTML = `
+  <div class="card"><h3>小区消杀档案（消杀记录 / 药剂消耗 / 宠物投诉与告知调整跟踪）</h3>
+    <div class="filter-row"><select id="ar-comm">${commOpts()}</select>
+    <button class="btn sm" onclick="loadArchive()">查询</button></div>
+    <div id="archive-body"></div>
+  </div>`;
+  await loadArchive();
+}
+async function loadArchive() {
+  const id = document.getElementById('ar-comm').value;
+  const a = await api('/api/communities/' + id + '/archive');
+  const t = a.pet_tracking;
+  document.getElementById('archive-body').innerHTML = `
+    <div class="stat-grid">
+      <div class="stat"><div class="num">${a.orders_total}</div><div class="lbl">工单总数</div></div>
+      <div class="stat"><div class="num">${a.orders_closed}</div><div class="lbl">已闭环</div></div>
+      <div class="stat"><div class="num">${a.treatments_total}</div><div class="lbl">消杀次数</div></div>
+      <div class="stat"><div class="num">${a.pet_complaints.total}</div><div class="lbl">宠物投诉</div></div>
+      <div class="stat"><div class="num">${a.pet_complaints.need_revisit}</div><div class="lbl">需回访</div></div>
+      <div class="stat"><div class="num">${a.pet_complaints.compensation}</div><div class="lbl">需赔付</div></div>
+    </div>
+    <div class="section"><h4>药剂消耗</h4>
+      ${a.chemical_usage.map(c => `<div>${esc(c.name)}：<b>${c.used.toFixed(1)}</b></div>`).join('') || '暂无'}
+    </div>
+    <div class="section"><h4>宠物投诉跟踪（进入下次计划参考）</h4>
+      ${t.adjusted_at ? `<div>最近告知调整：<b>${esc(t.latest_adjustment)}</b>（${fmtT(t.adjusted_at)}）</div>
+      <div>调整前 30 天投诉 ${t.before_count} 起（日均 ${t.before_per_day.toFixed(2)}） → 调整后 ${t.after_count} 起（日均 ${t.after_per_day.toFixed(2)}）
+      ${t.decreased ? badge('同类投诉已下降', 'b-green') : badge('同类投诉未下降', 'b-red')}</div>` : '暂无告知调整记录'}
+      ${a.notify_adjustments.length ? '<div style="margin-top:8px">' + a.notify_adjustments.map(x => `<div>· ${esc(x.complaint_no)}：${esc(x.notify_adjustment)}</div>`).join('') + '</div>' : ''}
+    </div>
+    <div class="section"><h4>最近居民告知</h4>
+      ${a.recent_notifications.map(n => `<div>· <b>${esc(n.title)}</b> ${esc(n.content)} <span style="color:#90a4ae">${fmtT(n.created_at)}</span></div>`).join('') || '暂无'}
+    </div>`;
+}
+
 /* ---------- 路由表 ---------- */
 const TAB_RENDERERS = {
   report: renderReport,
@@ -905,6 +1067,8 @@ const TAB_RENDERERS = {
   loop: renderLoop,
   assess: renderAssess,
   zones: renderZones,
+  pets: renderPets,
+  archive: renderArchive,
 };
 
 /* ---------- 启动 ---------- */

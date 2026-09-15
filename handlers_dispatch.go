@@ -124,9 +124,21 @@ func computeCandidates() []candidate {
 }
 
 func hDispatchPreview(c *Ctx) {
+	// 各小区宠物投诉跟踪（告知调整效果），供下次计划参考
+	petTracking := []*PetTracking{}
+	rows, err := db.Query(`SELECT DISTINCT community_id FROM pet_complaints`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			rows.Scan(&id)
+			petTracking = append(petTracking, petTrackingForCommunity(id))
+		}
+	}
 	jsonOK(c.W, map[string]any{
-		"risk_period": activeRiskPeriod(),
-		"candidates":  computeCandidates(),
+		"risk_period":  activeRiskPeriod(),
+		"candidates":   computeCandidates(),
+		"pet_tracking": petTracking,
 	})
 }
 

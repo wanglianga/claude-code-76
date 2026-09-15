@@ -298,4 +298,33 @@ CREATE TABLE IF NOT EXISTS zone_reminders (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_reminders_plan ON zone_reminders(plan_id);
+
+CREATE TABLE IF NOT EXISTS pet_complaints (
+  id BIGSERIAL PRIMARY KEY,
+  complaint_no TEXT NOT NULL DEFAULT '',
+  work_order_id BIGINT REFERENCES work_orders(id),
+  treatment_id BIGINT REFERENCES treatments(id),
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  reporter_user_id BIGINT NOT NULL REFERENCES users(id),
+  pet_type TEXT NOT NULL DEFAULT '',
+  pet_name TEXT NOT NULL DEFAULT '',
+  symptom TEXT NOT NULL DEFAULT '',
+  walking_route TEXT NOT NULL DEFAULT '',
+  chemical_id BIGINT REFERENCES chemicals(id),
+  chemical_name TEXT NOT NULL DEFAULT '',
+  spray_area TEXT NOT NULL DEFAULT '',
+  warning_time TIMESTAMPTZ,
+  medical_vouchers JSONB NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'pending',
+  need_revisit BOOLEAN NOT NULL DEFAULT false,
+  compensation BOOLEAN NOT NULL DEFAULT false,
+  compensation_note TEXT NOT NULL DEFAULT '',
+  chemical_note TEXT NOT NULL DEFAULT '',
+  notify_adjustment TEXT NOT NULL DEFAULT '',
+  resolution_note TEXT NOT NULL DEFAULT '',
+  handled_by BIGINT REFERENCES users(id),
+  handled_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pet_complaints_community ON pet_complaints(community_id, status, created_at);
 `

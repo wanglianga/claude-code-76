@@ -82,6 +82,8 @@ func hMeta(c *Ctx) {
 		"reminder_audience_labels":  ReminderAudienceLabels,
 		"delivery_status_labels":    DeliveryStatusLabels,
 		"wind_directions":           WindDirections,
+		"pet_types":                 PetTypes,
+		"pet_complaint_status_labels": PetComplaintStatusLabels,
 		"communities":               comms,
 		"teams":                     teams,
 		"users":                     users,

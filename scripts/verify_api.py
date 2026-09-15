@@ -329,5 +329,63 @@ check("计划B已确认且确认字段已写入", pB["status"] == "confirmed" an
 s, r = call("GET", "/api/notifications", toks["resident"])
 check("居民收到该计划恢复通知", any("阳光幼儿园" in (n["title"] or "") and "恢复时间" in (n["content"] or "") for n in r["data"]))
 
+print("== 14. 宠物误触投诉处理 ==")
+# 居民提交投诉：自动关联本小区最近一次消杀（药剂/区域/警示时间）
+s, r = call("POST", "/api/pet-complaints", toks["resident"], {
+    "pet_type": "dog", "pet_name": "豆豆", "symptom": "喷药后呕吐、精神萎靡",
+    "walking_route": "18:00 从 3 号楼沿中心花园遛狗至东门",
+    "medical_vouchers": ["https://example.com/vet-receipt-1.jpg"]})
+pc = r.get("data") or {}
+check("宠物投诉提交成功", s == 200 and pc.get("complaint_no", "").startswith("PC"))
+check("自动关联药剂/喷洒区域/警示时间", bool(pc.get("chemical_name")) and bool(pc.get("spray_area")) and bool(pc.get("warning_time")))
+check("行走路线已记录", pc.get("walking_route", "").startswith("18:00"))
+pcid = pc.get("id")
+pc_order = pc.get("work_order_id")
+# 补充就医凭证
+s, r = call("POST", f"/api/pet-complaints/{pcid}/vouchers", toks["resident"], {"vouchers": ["https://example.com/vet-receipt-2.jpg"]})
+check("补充就医凭证", s == 200)
+s, r = call("GET", f"/api/pet-complaints/{pcid}", toks["resident"])
+check("凭证已合并", len(r["data"]["medical_vouchers"]) == 2)
+# 他人不可见
+s, r = call("GET", "/api/pet-complaints", toks["resident2"])
+check("他人投诉不可见", all(p["id"] != pcid for p in r["data"]))
+s, r = call("GET", f"/api/pet-complaints/{pcid}", toks["resident2"])
+check("他人详情被拒绝(404)", s == 404)
+# 居民无权办结
+s, r = call("POST", f"/api/pet-complaints/{pcid}/handle", toks["resident"], {"resolution_note": "x"})
+check("居民无权办结(403)", s == 403)
+# 工单联动：异常与时间线
+if pc_order:
+    d = call("GET", "/api/work-orders/" + str(pc_order), toks["street"])[1]["data"]
+    check("工单时间线含宠物投诉", any("宠物" in l["action"] for l in d["logs"]))
+    check("未闭环工单生成宠物投诉异常", any(i["type"] == "pet_complaint" for i in d["issues"]))
+# 卫生监督办结：回访+赔付+药剂说明+告知调整
+s, r = call("POST", f"/api/pet-complaints/{pcid}/handle", toks["supervisor"], {
+    "need_revisit": True, "compensation": True, "compensation_note": "凭就医票据报销",
+    "chemical_note": "高效氯氟氰菊酯 1:100 稀释，安全间隔 4 小时，对犬类低毒",
+    "notify_adjustment": "改为短信+公告栏双通道，提前 48 小时告知并标注宠物避让路线",
+    "resolution_note": "已电话回访，宠物已好转"})
+check("卫生监督办结", s == 200)
+s, r = call("GET", f"/api/pet-complaints/{pcid}", toks["supervisor"])
+d = r["data"]
+check("办结记录完整（回访/赔付/药剂说明/告知调整）", d["status"] == "resolved" and d["need_revisit"] and d["compensation"] and d["chemical_note"] and d["notify_adjustment"])
+# 告知调整后再发一起同类投诉 → 跟踪统计
+s, r = call("POST", "/api/pet-complaints", toks["resident"], {
+    "pet_type": "cat", "pet_name": "咪咪", "symptom": "打喷嚏", "walking_route": "中心花园散步"})
+check("第二起投诉提交", s == 200)
+s, r = call("GET", "/api/pet-complaints/tracking?community_id=1", toks["street"])
+t = r["data"]
+check("跟踪含最新告知调整", t["latest_adjustment"].startswith("改为短信"))
+check("调整后同类投诉被统计", t["after_count"] >= 1 and t["decreased"] is not None)
+# 小区消杀档案
+s, r = call("GET", "/api/communities/1/archive", toks["supervisor"])
+a = r["data"]
+check("档案含消杀与药剂统计", a["treatments_total"] > 0 and len(a["chemical_usage"]) > 0)
+check("档案含宠物投诉与告知调整", a["pet_complaints"]["total"] >= 2 and len(a["notify_adjustments"]) >= 1)
+check("档案含跟踪结果", a["pet_tracking"]["latest_adjustment"] != "")
+# 跟踪进入下次计划（派单预览）
+s, r = call("GET", "/api/dispatch/preview", toks["street"])
+check("派单预览含宠物投诉跟踪", any(pt["community_name"] == "阳光小区" and pt["total_complaints"] >= 2 for pt in r["data"]["pet_tracking"]))
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

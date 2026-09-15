@@ -280,6 +280,18 @@ var DeliveryStatusLabels = map[string]string{
 
 var WindDirections = []string{"东风", "南风", "西风", "北风", "东南风", "东北风", "西南风", "西北风"}
 
+var PetComplaintStatusLabels = map[string]string{
+	"pending":  "待处理",
+	"resolved": "已办结",
+}
+
+var PetTypes = map[string]string{
+	"dog":   "犬",
+	"cat":   "猫",
+	"bird":  "鸟类",
+	"other": "其他",
+}
+
 func labelOf(m map[string]string, key string) string {
 	if v, ok := m[key]; ok {
 		return v
