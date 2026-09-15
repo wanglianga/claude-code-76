@@ -63,6 +63,7 @@ func seed() {
 		{"operator2", "Operator@123", "孙磊", "operator", "13800000007", nil, &t2},
 		{"street", "Street@123", "周主任", "street", "13800000008", nil, nil},
 		{"supervisor", "Supervisor@123", "吴监督", "supervisor", "13800000009", nil, nil},
+		{"kindergarten", "Kindergarten@123", "王园", "kindergarten", "13911110001", &yang, nil},
 	}
 	userIDs := map[string]int64{}
 	for _, x := range users {
@@ -178,6 +179,31 @@ func seed() {
 		if _, err := db.Exec(`INSERT INTO water_points(community_id, type, location_desc, source, larvae_found, created_at)
 			VALUES($1,$2,$3,'manual',$4,$5)`, p.comm, p.typ, p.loc, p.larvae, time.Now().AddDate(0, 0, -p.daysAgo)); err != nil {
 			log.Fatalf("seed water points: %v", err)
+		}
+	}
+
+	// 儿童活动区（幼儿园/乐园 + 园方联系人 + 儿童活动时段 + 家长群）
+	type cz struct {
+		comm            int64
+		name, typ       string
+		contact, phone  string
+		contactUser     string
+		activity, group string
+	}
+	zones := []cz{
+		{yang, "阳光幼儿园旁绿化带", "kindergarten", "王园", "13911110001", "kindergarten", "07:30-08:30,11:30-13:30,16:00-18:00", "阳光幼儿园家长一群"},
+		{bin, "滨江儿童乐园", "playground", "李园长", "13911110002", "", "08:00-10:00,15:00-18:30", "滨江乐园家长群"},
+	}
+	for _, z := range zones {
+		var contactUID *int64
+		if z.contactUser != "" {
+			if id, ok := userIDs[z.contactUser]; ok {
+				contactUID = &id
+			}
+		}
+		if _, err := db.Exec(`INSERT INTO child_zones(community_id, name, zone_type, contact_name, contact_phone, contact_user_id, activity_times, parent_group)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, z.comm, z.name, z.typ, z.contact, z.phone, contactUID, z.activity, z.group); err != nil {
+			log.Fatalf("seed child zones: %v", err)
 		}
 	}
 

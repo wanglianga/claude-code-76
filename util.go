@@ -142,12 +142,13 @@ func (s *StringList) Scan(src any) error {
 // ---- 枚举与中文标签 ----
 
 var RoleLabels = map[string]string{
-	"resident":   "居民",
-	"property":   "物业",
-	"grid":       "网格员",
-	"operator":   "消杀人员",
-	"street":     "街道",
-	"supervisor": "卫生监督",
+	"resident":     "居民",
+	"property":     "物业",
+	"grid":         "网格员",
+	"operator":     "消杀人员",
+	"street":       "街道",
+	"supervisor":   "卫生监督",
+	"kindergarten": "园方联系人",
 }
 
 var ReportTypes = map[string]string{
@@ -250,6 +251,34 @@ var IssueStatusLabels = map[string]string{
 	"open":     "待处理",
 	"resolved": "已解决",
 }
+
+var ChildZoneTypes = map[string]string{
+	"kindergarten": "幼儿园",
+	"playground":   "儿童乐园",
+	"school":       "学校周边",
+}
+
+var PlanStatusLabels = map[string]string{
+	"planned":         "已计划",
+	"notified":        "已提醒",
+	"treated":         "已作业",
+	"warning_removed": "警示已撤除",
+	"confirmed":       "园方已确认",
+}
+
+var ReminderAudienceLabels = map[string]string{
+	"kindergarten": "幼儿园",
+	"parents":      "家长群",
+	"residents":    "附近居民",
+}
+
+var DeliveryStatusLabels = map[string]string{
+	"pending":   "待发送",
+	"sent":      "已发送",
+	"delivered": "已送达",
+}
+
+var WindDirections = []string{"东风", "南风", "西风", "北风", "东南风", "东北风", "西南风", "西北风"}
 
 func labelOf(m map[string]string, key string) string {
 	if v, ok := m[key]; ok {

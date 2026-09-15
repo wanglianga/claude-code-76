@@ -655,6 +655,12 @@ func hCreateTreatment(c *Ctx) {
 		jsonErr(c.W, 500, err.Error())
 		return
 	}
+	// 关联的儿童活动区错峰计划进入「已作业」，待警示撤除与园方确认
+	if res, err := db.Exec(`UPDATE child_zone_plans SET status='treated' WHERE work_order_id=$1 AND status IN ('planned','notified')`, id); err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			addLog(id, nil, "错峰消杀作业完成", "儿童活动区作业已完成，待警示撤除与园方确认")
+		}
+	}
 	addLog(id, c.User, "消杀完成", fmt.Sprintf("药剂 %s（浓度 %s）用量 %.1f，喷洒区域：%s；警示牌:%v 居民告知:%v 宠物避让:%v；%d 天后复查",
 		chemName, req.Concentration, req.ChemicalUsed, req.SprayArea, req.WarningSign, req.ResidentNotified, req.PetAvoided, recheckIntervalDays()))
 	if req.NewWaterPoint {

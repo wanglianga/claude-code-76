@@ -165,5 +165,67 @@ s, r = call("POST", f"/api/work-orders/{oid}/treatments", toks["operator"], {
     "chemical_id": chem["id"], "spray_area": "x", "chemical_used": 99999})
 check("已闭环工单不可再消杀(409)", s == 409)
 
+print("== 11. 儿童活动区错峰消杀 ==")
+from datetime import datetime, timedelta
+toks["kindergarten"] = login("kindergarten", "Kindergarten@123")
+check("园方联系人登录", bool(toks["kindergarten"]))
+s, r = call("GET", "/api/child-zones", toks["street"])
+zones = r["data"]
+zone = next((z for z in zones if "幼儿园" in z["name"]), None)
+check("儿童活动区已登记（含联系人/活动时段/家长群）", zone and zone["contact_name"] and zone["activity_times"] and zone["parent_group"])
+tomorrow = datetime.now() + timedelta(days=1)
+def dt(h, m=0): return (tomorrow.replace(hour=h, minute=m)).strftime("%Y-%m-%d %H:%M")
+# 与儿童活动时间冲突 → 应被拒绝（活动时段 16:00-18:00）
+s, r = call("POST", "/api/child-zone-plans", toks["street"], {
+    "child_zone_id": zone["id"], "planned_start": dt(17), "planned_end": dt(18),
+    "wind_direction": "东南风", "safety_interval_hours": 1})
+check("与儿童活动时间冲突的计划被拒绝(409)", s == 409, f"({r.get('message','')[:40]}...)")
+# 错峰时段（晚间）→ 通过
+s, r = call("POST", "/api/child-zone-plans", toks["street"], {
+    "child_zone_id": zone["id"], "planned_start": dt(20), "planned_end": dt(21),
+    "wind_direction": "东南风", "safety_interval_hours": 2})
+plan = r.get("data") or {}
+check("错峰计划创建成功", s == 200 and plan.get("status") == "notified")
+check("恢复时间=结束+安全间隔", plan.get("recovery_time", "").startswith((tomorrow).strftime("%Y-%m-%d")) and "23:00" in plan.get("recovery_time", ""))
+pid = plan.get("id")
+s, r = call("GET", f"/api/child-zone-plans/{pid}", toks["street"])
+rems = r["data"]["reminders"]
+check("提醒推送幼儿园/家长群/附近居民", {x["audience"] for x in rems} == {"kindergarten", "parents", "residents"})
+check("提醒标明避让时段与联系人", all(x["avoid_period"] and x["contact_info"] for x in rems))
+check("提醒保留送达状态(已发送)", all(x["delivery_status"] == "sent" for x in rems))
+kg_rem = next(x for x in rems if x["audience"] == "kindergarten")
+s, r = call("POST", f"/api/child-zone-plans/{pid}/reminders/{kg_rem['id']}/deliver", toks["kindergarten"], {})
+check("幼儿园提醒确认送达", s == 200)
+# 关联工单：新上报→派单→消杀→计划自动已作业→撤警示→园方确认→居民可见
+call("POST", "/api/reports", toks["resident"], {"type": "greenbelt_water", "location_desc": "阳光幼儿园旁绿化带", "nearby_population": "儿童", "has_pets": False})
+call("POST", "/api/dispatch/generate", toks["street"], {"date": datetime.now().strftime("%Y-%m-%d")})
+orders = call("GET", "/api/work-orders?status=assigned", toks["operator"])[1]["data"]
+oid2 = orders[0]["id"]
+s, r = call("POST", "/api/child-zone-plans", toks["street"], {
+    "child_zone_id": zone["id"], "work_order_id": oid2, "planned_start": dt(20, 30), "planned_end": dt(21, 30),
+    "wind_direction": "北风", "safety_interval_hours": 2})
+pid2 = r["data"]["id"]
+check("关联工单的错峰计划", s == 200)
+call("POST", f"/api/work-orders/{oid2}/start", toks["operator"], {})
+chem = call("GET", "/api/chemicals", toks["operator"])[1]["data"][0]
+call("POST", f"/api/work-orders/{oid2}/treatments", toks["operator"], {
+    "chemical_id": chem["id"], "concentration": "1:100", "spray_area": "幼儿园旁绿化带",
+    "chemical_used": 1.0, "warning_sign": True, "resident_notified": True, "pet_avoided": True})
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])
+check("消杀提交后计划自动转「已作业」", r["data"]["plan"]["status"] == "treated")
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/confirm", toks["kindergarten"], {"note": "提前确认"})
+check("未撤警示不可园方确认(409)", s == 409)
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/remove-warning", toks["operator"], {})
+check("警示撤除", s == 200)
+s, r = call("GET", "/api/work-orders/" + str(oid2), toks["street"])
+check("警示撤除进入工单时间线", any("警示撤除" in l["action"] for l in r["data"]["logs"]))
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/confirm", toks["kindergarten"], {"note": "现场已恢复安全"})
+check("园方确认", s == 200 and call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])[1]["data"]["plan"]["status"] == "confirmed")
+s, r = call("GET", "/api/work-orders/" + str(oid2), toks["street"])
+check("园方确认进入工单时间线", any("园方确认" in l["action"] for l in r["data"]["logs"]))
+s, r = call("GET", "/api/notifications", toks["resident"])
+rec_notice = next((n for n in r["data"] if "儿童活动恢复" in (n["title"] or "")), None)
+check("居民端可见安全间隔与恢复时间", rec_notice and "安全间隔" in rec_notice["content"] and "恢复时间" in rec_notice["content"])
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

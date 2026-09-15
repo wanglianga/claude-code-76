@@ -245,4 +245,57 @@ CREATE TABLE IF NOT EXISTS risk_periods (
   created_by BIGINT REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS child_zones (
+  id BIGSERIAL PRIMARY KEY,
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  name TEXT NOT NULL,
+  zone_type TEXT NOT NULL DEFAULT 'kindergarten',
+  contact_name TEXT NOT NULL DEFAULT '',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  contact_user_id BIGINT REFERENCES users(id),
+  activity_times TEXT NOT NULL DEFAULT '',
+  parent_group TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS child_zone_plans (
+  id BIGSERIAL PRIMARY KEY,
+  plan_no TEXT NOT NULL DEFAULT '',
+  work_order_id BIGINT REFERENCES work_orders(id),
+  child_zone_id BIGINT NOT NULL REFERENCES child_zones(id),
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  planned_start TIMESTAMPTZ NOT NULL,
+  planned_end TIMESTAMPTZ NOT NULL,
+  wind_direction TEXT NOT NULL DEFAULT '',
+  safety_interval_hours DOUBLE PRECISION NOT NULL DEFAULT 4,
+  recovery_time TIMESTAMPTZ,
+  contact_name TEXT NOT NULL DEFAULT '',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'planned',
+  warning_removed_at TIMESTAMPTZ,
+  warning_removed_by BIGINT REFERENCES users(id),
+  confirmed_by BIGINT REFERENCES users(id),
+  confirmed_at TIMESTAMPTZ,
+  confirm_note TEXT NOT NULL DEFAULT '',
+  created_by BIGINT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_cz_plans_zone ON child_zone_plans(child_zone_id, status);
+
+CREATE TABLE IF NOT EXISTS zone_reminders (
+  id BIGSERIAL PRIMARY KEY,
+  plan_id BIGINT NOT NULL REFERENCES child_zone_plans(id),
+  audience TEXT NOT NULL,
+  channel TEXT NOT NULL DEFAULT 'app',
+  title TEXT NOT NULL DEFAULT '',
+  content TEXT NOT NULL DEFAULT '',
+  avoid_period TEXT NOT NULL DEFAULT '',
+  contact_info TEXT NOT NULL DEFAULT '',
+  delivery_status TEXT NOT NULL DEFAULT 'pending',
+  sent_at TIMESTAMPTZ,
+  delivered_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_reminders_plan ON zone_reminders(plan_id);
 `

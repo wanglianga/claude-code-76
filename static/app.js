@@ -61,7 +61,8 @@ function renderLogin() {
       <b>演示账号</b>（角色 / 用户名 / 密码）<br>
       居民 resident / Resident@123 ｜ 物业 property / Property@123<br>
       网格员 grid / Grid@123 ｜ 消杀 operator / Operator@123<br>
-      街道 street / Street@123 ｜ 卫生监督 supervisor / Supervisor@123
+      街道 street / Street@123 ｜ 卫生监督 supervisor / Supervisor@123<br>
+      园方联系人 kindergarten / Kindergarten@123
     </div>
   </div>`;
 }
@@ -84,7 +85,7 @@ async function doLogout() {
 /* ---------- 主框架 ---------- */
 const TABS = {
   resident: [
-    ['report', '上报问题'], ['reports', '我的上报'], ['notices', '居民告知'],
+    ['report', '上报问题'], ['reports', '我的上报'], ['zones', '儿童活动区'], ['notices', '居民告知'],
   ],
   property: [
     ['report', '上报问题'], ['rects', '整改任务'], ['orders', '小区工单'], ['notices', '居民告知'],
@@ -93,15 +94,18 @@ const TABS = {
     ['report', '上报问题'], ['points', '积水点管理'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
   ],
   operator: [
-    ['orders', '我的工单'], ['points', '积水点'], ['chems', '药剂库存'],
+    ['orders', '我的工单'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
   ],
   street: [
     ['dispatch', '派单中心'], ['orders', '工单总览'], ['points', '积水点'], ['keylist', '重点积水点'],
     ['chems', '药剂库存'], ['sched', '排班管理'], ['rainfall', '降雨记录'], ['risk', '重点风险期'],
-    ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
+    ['zones', '错峰消杀'], ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
   ],
   supervisor: [
-    ['orders', '工单总览'], ['keylist', '重点积水点'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
+    ['orders', '工单总览'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
+  ],
+  kindergarten: [
+    ['zones', '消杀计划确认'], ['notices', '居民告知'],
   ],
 };
 
@@ -756,6 +760,134 @@ async function loadAssess() {
   </table></div>`;
 }
 
+/* ---------- 儿童活动区错峰消杀 ---------- */
+const PLAN_COLOR = { planned: 'b-gray', notified: 'b-blue', treated: 'b-purple', warning_removed: 'b-orange', confirmed: 'b-green' };
+function planBadge(p) { return badge(p.status_label, PLAN_COLOR[p.status]); }
+
+async function renderZones(el) {
+  const role = me.role;
+  const zones = await api('/api/child-zones');
+  const plans = await api('/api/child-zone-plans');
+  let head = '';
+
+  if (role === 'street') {
+    const kgUsers = (meta.users || []).filter(u => u.role === 'kindergarten');
+    const orders = (await api('/api/work-orders')).filter(o => o.status !== 'closed');
+    head = `
+    <div class="card"><h3>儿童活动区管理</h3>
+      <div class="form-grid">
+        <div class="form-item"><label>小区</label><select id="cz-comm">${commOpts()}</select></div>
+        <div class="form-item"><label>活动区名称</label><input id="cz-name" placeholder="如：阳光幼儿园旁绿化带"></div>
+        <div class="form-item"><label>类型</label><select id="cz-type">${opts(meta.child_zone_types)}</select></div>
+        <div class="form-item"><label>园方联系人</label><input id="cz-contact" placeholder="姓名"></div>
+        <div class="form-item"><label>联系电话</label><input id="cz-phone" placeholder="手机"></div>
+        <div class="form-item"><label>园方账号（可确认）</label><select id="cz-user"><option value="">不绑定</option>${kgUsers.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></div>
+        <div class="form-item"><label>儿童活动时段（错峰依据）</label><input id="cz-activity" placeholder="07:30-08:30,16:00-18:00"></div>
+        <div class="form-item"><label>家长群</label><input id="cz-group" placeholder="如：阳光幼儿园家长一群"></div>
+      </div>
+      <div class="btn-row"><button class="btn" onclick="addZone()">保存活动区</button></div>
+    </div>
+    <div class="card"><h3>新建错峰消杀计划（按儿童活动时间 / 风向 / 药剂安全间隔 / 园方联系人安排）</h3>
+      <div class="form-grid">
+        <div class="form-item"><label>儿童活动区 *</label><select id="cp-zone">${zones.map(z => `<option value="${z.id}">${esc(z.name)}（活动时段 ${esc(z.activity_times || '无')}）</option>`).join('')}</select></div>
+        <div class="form-item"><label>关联工单（选填）</label><select id="cp-order"><option value="">不关联</option>${orders.map(o => `<option value="${o.id}">${esc(o.order_no)} ${esc(o.source_desc)}</option>`).join('')}</select></div>
+        <div class="form-item"><label>计划开始 *</label><input type="datetime-local" id="cp-start"></div>
+        <div class="form-item"><label>计划结束 *</label><input type="datetime-local" id="cp-end"></div>
+        <div class="form-item"><label>风向</label><select id="cp-wind">${(meta.wind_directions || []).map(w => `<option>${w}</option>`).join('')}</select></div>
+        <div class="form-item"><label>药剂安全间隔（小时）</label><input type="number" id="cp-interval" value="4" step="0.5"></div>
+      </div>
+      <div class="btn-row"><button class="btn" onclick="addPlan()">生成计划并推送提醒</button></div>
+      <div style="font-size:12px;color:#90a4ae;margin-top:8px">作业时段 + 安全间隔若与儿童活动时间重叠将被拒绝；创建后自动向幼儿园、家长群、附近居民推送含避让时段与联系人的提醒。</div>
+    </div>`;
+  }
+
+  const canOperate = ['street', 'operator'].includes(role);
+  el.innerHTML = head + `
+  <div class="card"><h3>${role === 'resident' ? '儿童活动区消杀安排与恢复时间' : '错峰消杀计划'}</h3><div class="table-wrap"><table>
+    <tr><th>计划号</th><th>活动区</th><th>小区</th><th>作业时段</th><th>避让时段（含安全间隔）</th><th>风向</th><th>安全间隔</th><th>儿童活动恢复时间</th><th>园方联系人</th><th>关联工单</th><th>状态</th><th>操作</th></tr>
+    ${plans.map(p => `<tr>
+      <td>${esc(p.plan_no)}</td>
+      <td>${esc(p.zone_name)}<br><span style="font-size:11px;color:#90a4ae">${esc(p.zone_type_label)} · 活动时段 ${esc(p.activity_times || '-')}</span></td>
+      <td>${esc(p.community_name)}</td>
+      <td>${fmtT(p.planned_start)}<br>~ ${fmtT(p.planned_end)}</td>
+      <td>${fmtT(p.planned_start)} ~ ${p.recovery_time ? fmtT(p.recovery_time) : '-'}</td>
+      <td>${esc(p.wind_direction || '-')}</td>
+      <td>${p.safety_interval_hours} 小时</td>
+      <td>${p.status === 'confirmed' && p.recovery_time ? badge(fmtT(p.recovery_time), 'b-green') : (p.recovery_time ? fmtT(p.recovery_time) + '<br>' + badge('待园方确认', 'b-orange') : '-')}</td>
+      <td>${esc(p.contact_name)} ${esc(p.contact_phone)}</td>
+      <td>${p.order_no ? esc(p.order_no) : '-'}</td>
+      <td>${planBadge(p)}</td>
+      <td>
+        <button class="btn sm gray" onclick="openPlanReminders(${p.id})">提醒</button>
+        ${canOperate && p.status === 'treated' ? `<button class="btn sm orange" onclick="removeWarning(${p.id})">撤除警示</button>` : ''}
+        ${role === 'kindergarten' && p.status === 'warning_removed' ? `<span class="inline-form"><input id="confirm-${p.id}" placeholder="确认意见"><button class="btn sm" onclick="confirmPlan(${p.id})">园方确认</button></span>` : ''}
+      </td>
+    </tr>`).join('') || '<tr><td colspan="12">暂无计划</td></tr>'}
+  </table></div>
+  ${role === 'resident' ? '<div style="font-size:12px;color:#78909c;margin-top:10px">园方确认后，本页与「居民告知」会展示药剂安全间隔与儿童活动恢复时间。</div>' : ''}
+  </div>`;
+}
+async function addZone() {
+  await run(async () => {
+    const body = {
+      community_id: parseInt(val('cz-comm')), name: val('cz-name'), zone_type: val('cz-type'),
+      contact_name: val('cz-contact'), contact_phone: val('cz-phone'),
+      activity_times: val('cz-activity'), parent_group: val('cz-group'),
+    };
+    if (val('cz-user')) body.contact_user_id = parseInt(val('cz-user'));
+    await api('/api/child-zones', { method: 'POST', body });
+    toast('儿童活动区已保存'); switchTab('zones');
+  });
+}
+async function addPlan() {
+  await run(async () => {
+    const body = {
+      child_zone_id: parseInt(val('cp-zone')),
+      planned_start: val('cp-start'), planned_end: val('cp-end'),
+      wind_direction: val('cp-wind'), safety_interval_hours: num('cp-interval') || 4,
+    };
+    if (val('cp-order')) body.work_order_id = parseInt(val('cp-order'));
+    await api('/api/child-zone-plans', { method: 'POST', body });
+    toast('错峰计划已生成，提醒已推送幼儿园/家长群/附近居民'); switchTab('zones');
+  });
+}
+async function openPlanReminders(planId) {
+  document.getElementById('modal-mask').classList.remove('hidden');
+  document.getElementById('modal-body').innerHTML = '加载中...';
+  await run(async () => {
+    const d = await api('/api/child-zone-plans/' + planId);
+    const p = d.plan;
+    const canDeliver = ['street', 'operator', 'kindergarten'].includes(me.role);
+    document.getElementById('modal-body').innerHTML = `
+      <span class="close-x" onclick="closeModal()">✕</span>
+      <h2>计划 ${esc(p.plan_no)} ${planBadge(p)}</h2>
+      <div class="sub">${esc(p.zone_name)} ｜ 作业 ${fmtT(p.planned_start)} ~ ${fmtT(p.planned_end)} ｜ 风向 ${esc(p.wind_direction || '-')} ｜ 安全间隔 ${p.safety_interval_hours}h ｜ 恢复 ${p.recovery_time ? fmtT(p.recovery_time) : '-'}</div>
+      <div class="section"><h4>作业提醒（幼儿园 / 家长群 / 附近居民，含避让时段与联系人，保留送达状态）</h4>
+      <div class="table-wrap"><table>
+        <tr><th>对象</th><th>渠道</th><th>避让时段</th><th>联系人</th><th>内容</th><th>送达状态</th><th>操作</th></tr>
+        ${d.reminders.map(r => `<tr>
+          <td>${esc(r.audience_label)}</td><td>${esc(r.channel)}</td><td>${esc(r.avoid_period)}</td><td>${esc(r.contact_info)}</td>
+          <td style="max-width:320px">${esc(r.content)}</td>
+          <td>${badge(r.delivery_status_label, r.delivery_status === 'delivered' ? 'b-green' : (r.delivery_status === 'sent' ? 'b-blue' : 'b-gray'))}${r.delivered_at ? '<br><span style="font-size:11px;color:#90a4ae">' + fmtT(r.delivered_at) + '</span>' : ''}</td>
+          <td>${canDeliver && r.delivery_status === 'sent' ? `<button class="btn sm" onclick="deliverReminder(${p.id},${r.id})">确认送达</button>` : ''}</td>
+        </tr>`).join('')}
+      </table></div></div>`;
+  });
+}
+async function deliverReminder(planId, rid) {
+  await run(async () => { const r = await api(`/api/child-zone-plans/${planId}/reminders/${rid}/deliver`, { method: 'POST', body: {} }); toast(r.message); openPlanReminders(planId); });
+}
+async function removeWarning(planId) {
+  await run(async () => { const r = await api(`/api/child-zone-plans/${planId}/remove-warning`, { method: 'POST', body: {} }); toast(r.message); switchTab('zones'); });
+}
+async function confirmPlan(planId) {
+  await run(async () => {
+    const note = val('confirm-' + planId) || '现场确认无误';
+    const r = await api(`/api/child-zone-plans/${planId}/confirm`, { method: 'POST', body: { note } });
+    toast(r.message); switchTab('zones');
+  });
+}
+
 /* ---------- 路由表 ---------- */
 const TAB_RENDERERS = {
   report: renderReport,
@@ -772,6 +904,7 @@ const TAB_RENDERERS = {
   risk: renderRisk,
   loop: renderLoop,
   assess: renderAssess,
+  zones: renderZones,
 };
 
 /* ---------- 启动 ---------- */
