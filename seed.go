@@ -208,6 +208,90 @@ func seed() {
 		}
 	}
 
+	// 物业积水整改演示（地下室排水沟长期积水 → 消杀队临时处理 → 物业排水整改 → 按图复查）
+	type wpID struct {
+		loc string
+		id  int64
+	}
+	b2id := wpID{loc: "地下车库 B2 集水井"}
+	if err := db.QueryRow(`SELECT id FROM water_points WHERE community_id=$1 AND location_desc=$2`, yang, b2id.loc).Scan(&b2id.id); err != nil {
+		b2id.id = 0
+	}
+	var binBaseID int64
+	if err := db.QueryRow(`INSERT INTO water_points(community_id, type, location_desc, source, larvae_found, status, created_at)
+		VALUES($1,'basement_damp','地下车库 A 区排水沟','manual',true,'rectifying',$2) RETURNING id`,
+		bin, time.Now().AddDate(0, 0, -5)).Scan(&binBaseID); err != nil {
+		log.Fatalf("seed binjiang basement point: %v", err)
+	}
+	var yangBase2ID int64
+	if err := db.QueryRow(`INSERT INTO water_points(community_id, type, location_desc, source, larvae_found, status, created_at)
+		VALUES($1,'basement_damp','地下车库 B1 排水沟','manual',false,'cleared',$2) RETURNING id`,
+		yang, time.Now().AddDate(0, 0, -20)).Scan(&yangBase2ID); err != nil {
+		log.Fatalf("seed yang basement point: %v", err)
+	}
+
+	// ① 整改超期：阳光小区 B2 集水井，消杀队已临时处理 2 次，物业尚未完成（复查日期已过 3 天）
+	var pr1 int64
+	if err := db.QueryRow(`INSERT INTO property_rectifications
+		(work_order_id, water_point_id, community_id, water_location, water_type,
+		 temp_treated_by, temp_treatment, temp_treated_at, temp_treatment_times,
+		 facility_user_id, recheck_date, complaints_before, status, created_by, created_at)
+		VALUES(NULL,$1,$2,$3,'underground_garage',$4,$5,$6,2,$7,$8,1,'pending',$9,$10) RETURNING id`,
+		b2id.id, yang, b2id.loc,
+		userIDs["operator"], "消杀队临时抽排+投药灭孑孓，排水沟长期返水需物业工程维修", time.Now().AddDate(0, 0, -6),
+		userIDs["property"], time.Now().AddDate(0, 0, -3), userIDs["operator"], time.Now().AddDate(0, 0, -6)).Scan(&pr1); err != nil {
+		log.Fatalf("seed prop rect 1: %v", err)
+	}
+	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, pr1)
+
+	// ② 复查超期：滨江花园 A 区排水沟，物业已报审（照片标注位置+方式），但复查日期已过 2 天仍未按图核验
+	var pr2 int64
+	if err := db.QueryRow(`INSERT INTO property_rectifications
+		(water_point_id, community_id, water_location, water_type,
+		 temp_treated_by, temp_treatment, temp_treated_at, temp_treatment_times,
+		 facility_user_id, recheck_date, repair_desc, repair_method, rectify_photos, rectify_photo_remark,
+		 rectified_by, rectified_at, complaints_before, status, created_by, created_at)
+		VALUES($1,$2,$3,'basement_damp',$4,$5,$6,2,$7,$8,
+		 $9,'dredge_drain',$10::jsonb,$11,$12,$13,1,'recheck_pending',$4,$14) RETURNING id`,
+		binBaseID, bin, "地下车库 A 区排水沟",
+		userIDs["operator2"], "临时抽排积水并投药", time.Now().AddDate(0, 0, -9),
+		userIDs["property2"], time.Now().AddDate(0, 0, -2),
+		"已清掏排水沟淤积泥沙，修复 A 区集水井排水泵，排水沟恢复通畅无积水",
+		`["https://example.com/rect-bin-a-1.jpg","https://example.com/rect-bin-a-2.jpg"]`,
+		"照片①位置：地下车库 A 区排水沟起点（红色标识积水点）；处理方式：清掏淤积、更换排水泵。照片②位置：A 区集水井；处理方式：维修后复拍，沟通无积水",
+		userIDs["property2"], time.Now().AddDate(0, 0, -3),
+		time.Now().AddDate(0, 0, -9)).Scan(&pr2); err != nil {
+		log.Fatalf("seed prop rect 2: %v", err)
+	}
+	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, pr2)
+
+	// ③ 复查通过 + 投诉下降：阳光小区 B1 排水沟已整改并按图核验通过，居民投诉由 2 起降为 0
+	var pr3 int64
+	if err := db.QueryRow(`INSERT INTO property_rectifications
+		(water_point_id, community_id, water_location, water_type,
+		 temp_treated_by, temp_treatment, temp_treated_at, temp_treatment_times,
+		 facility_user_id, recheck_date, repair_desc, repair_method, rectify_photos, rectify_photo_remark,
+		 rectified_by, rectified_at,
+		 recheck_photos, recheck_remark, recheck_result, rechecked_by, rechecked_at,
+		 complaints_before, complaints_after, status, created_by, created_at)
+		VALUES($1,$2,$3,'basement_damp',$4,$5,$6,2,$7,$8,
+		 $9,'rebuild_drain',$10::jsonb,$11,$7,$12,
+		 $13::jsonb,$14,'pass',$15,$16,2,0,'verified',$4,$17) RETURNING id`,
+		yangBase2ID, yang, "地下车库 B1 排水沟",
+		userIDs["operator"], "临时投药处理 2 次", time.Now().AddDate(0, 0, -12),
+		userIDs["property"], time.Now().AddDate(0, 0, -9),
+		"重做排水沟找坡并增设溢流管，雨后 30 分钟内排干",
+		`["https://example.com/rect-yang-b1-before.jpg","https://example.com/rect-yang-b1-after.jpg"]`,
+		"照片①位置：B1 排水沟低洼点（黄色圈注积水位置），处理方式：重做找坡；照片②位置：同一位置整改后，处理方式：增设溢流管",
+		time.Now().AddDate(0, 0, -10),
+		`["https://example.com/recheck-yang-b1.jpg"]`,
+		"对照整改照片同一角度复查，排水沟无积水、无孑孓，按图核验通过",
+		userIDs["grid"], time.Now().AddDate(0, 0, -8),
+		time.Now().AddDate(0, 0, -12)).Scan(&pr3); err != nil {
+		log.Fatalf("seed prop rect 3: %v", err)
+	}
+	db.Exec(`UPDATE property_rectifications SET rect_no='PR'||LPAD(id::text,8,'0') WHERE id=$1`, pr3)
+
 	refreshKeyWaterPoints()
 	log.Println("seed done")
 }

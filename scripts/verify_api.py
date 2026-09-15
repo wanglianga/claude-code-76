@@ -387,5 +387,145 @@ check("档案含跟踪结果", a["pet_tracking"]["latest_adjustment"] != "")
 s, r = call("GET", "/api/dispatch/preview", toks["street"])
 check("派单预览含宠物投诉跟踪", any(pt["community_name"] == "阳光小区" and pt["total_complaints"] >= 2 for pt in r["data"]["pet_tracking"]))
 
+print("== 15. 物业积水整改（地下室排水沟长期积水） ==")
+toks["property2"] = login("property2", "Property@123")
+
+# 15.1 列表 / 超期 / 可见范围
+s, r = call("GET", "/api/property-rectifications", toks["street"])
+prects = r["data"]
+check("积水整改列表（含 3 条种子演示）", s == 200 and len(prects) >= 3, f"({len(prects)} 条)")
+pr1 = next(p for p in prects if "B2 集水井" in p["water_location"])
+pr2 = next(p for p in prects if "A 区排水沟" in p["water_location"])
+pr3 = next(p for p in prects if "B1 排水沟" in p["water_location"])
+check("种子①整改超期（待整改且复查日期已过）", pr1["status"] == "pending" and pr1["rect_overdue"])
+check("种子②复查超期（已报审待复查且日期已过）", pr2["status"] == "recheck_pending" and pr2["recheck_overdue"])
+check("种子③已按图复查通过且投诉 2→0", pr3["status"] == "verified" and pr3["complaints_before"] == 2 and pr3["complaints_after"] == 0 and pr3["complaint_decreased"] is True)
+s, r = call("GET", "/api/property-rectifications?overdue=1", toks["street"])
+check("仅看超期过滤生效", len(r["data"]) >= 2 and all(p["rect_overdue"] or p["recheck_overdue"] for p in r["data"]))
+s, r = call("GET", "/api/property-rectifications", toks["resident"])
+check("居民列表为空（无权查看）", s == 200 and r["data"] == [])
+s, r = call("GET", f"/api/property-rectifications/{pr1['id']}", toks["resident2"])
+check("居民查看详情被拒绝(403)", s == 403)
+s, r = call("GET", "/api/property-rectifications", toks["property2"])
+check("物业2只见滨江任务", all(p["community_name"] == "滨江花园" for p in r["data"]) and any(p["id"] == pr2["id"] for p in r["data"]))
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/start", toks["property2"], {})
+check("非设施责任人受理被拒绝(403)", s == 403)
+
+# 15.2 种子①：整改超期 → 受理 → 标注照片完成 → 按图复查通过 → 投诉变化
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/start", toks["property"], {})
+check("设施责任人受理", s == 200)
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/complete", toks["property"], {
+    "repair_desc": "已清掏集水井淤泥", "repair_method": "dredge_drain",
+    "rectify_photos": [], "rectify_photo_remark": ""})
+check("未传整改照片/标注被拒绝(400)", s == 400)
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/complete", toks["property"], {
+    "repair_desc": "清掏集水井淤积并更换损坏排水泵，沟通后无积水", "repair_method": "replace_pump",
+    "rectify_photos": ["https://example.com/pr1-before.jpg", "https://example.com/pr1-after.jpg"],
+    "rectify_photo_remark": "照片①位置：地下车库B2集水井（红圈标注长期积水点），处理方式：抽排清淤；照片②位置：同一集水井，处理方式：更换排水泵后复拍"})
+check("物业提交整改完成（照片标明位置+方式）", s == 200)
+s, r = call("GET", f"/api/property-rectifications/{pr1['id']}", toks["street"])
+p1 = r["data"]
+check("进入待复查且整改照片/方式已记录", p1["status"] == "recheck_pending" and len(p1["rectify_photos"]) == 2 and p1["repair_method_label"] == "检修/更换排水泵")
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/supervise", toks["street"], {"content": "请尽快安排复查，超期纳入物业考核"})
+check("街道督办", s == 200)
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/recheck", toks["supervisor"], {
+    "pass": True, "recheck_photos": [], "recheck_remark": "无照片"})
+check("复查未传复查照片被拒绝(400)", s == 400)
+s, r = call("POST", f"/api/property-rectifications/{pr1['id']}/recheck", toks["supervisor"], {
+    "pass": True, "recheck_photos": ["https://example.com/pr1-recheck.jpg"],
+    "recheck_remark": "对照整改照片同一位置按图核验，集水井已无积水、无孑孓"})
+check("卫生监督按图复查通过", s == 200 and r["data"]["complaints_after"] is not None)
+s, r = call("GET", f"/api/property-rectifications/{pr1['id']}", toks["street"])
+p1 = r["data"]
+check("任务复查通过且投诉变化已回写", p1["status"] == "verified" and p1["complaints_before"] >= p1["complaints_after"])
+check("督办记录保留", any(m["kind"] == "supervise" for m in p1["reminders"]))
+s, r = call("GET", "/api/water-points?type=underground_garage", toks["street"])
+check("复查通过后积水点清除", any(w["location_desc"] == "地下车库 B2 集水井" and w["status"] == "cleared" for w in r["data"]))
+
+# 15.3 种子②：复查超期提示街道督办与物业负责人 → 复查
+s, r = call("GET", f"/api/property-rectifications/{pr2['id']}", toks["street"])
+check("复查超期自动生成提示", any(m["kind"] == "recheck_overdue" for m in r["data"]["reminders"]))
+s, r = call("POST", f"/api/property-rectifications/{pr2['id']}/complete", toks["property2"], {
+    "repair_desc": "x", "repair_method": "dredge_drain", "rectify_photos": ["https://x/1.jpg"], "rectify_photo_remark": "x"})
+check("待复查状态不可重复提交整改(409)", s == 409)
+s, r = call("POST", f"/api/property-rectifications/{pr2['id']}/recheck", toks["street"], {
+    "pass": True, "recheck_photos": ["https://example.com/pr2-recheck.jpg"], "recheck_remark": "街道按图核验通过"})
+check("街道复查通过（复查超期任务）", s == 200)
+
+# 15.4 看板：超期清零、设施责任人维度入考核
+s, r = call("GET", "/api/dashboard/closed-loop", toks["street"])
+rowmap = {x["community_name"]: x for x in r["data"]["rows"]}
+check("闭环看板含积水整改列", "prop_rect_total" in rowmap["阳光小区"] and rowmap["阳光小区"]["prop_rect_verified"] >= 2)
+check("超期已随复查清零", rowmap["阳光小区"]["prop_rect_overdue"] == 0 and rowmap["滨江花园"]["prop_rect_overdue"] == 0)
+s, r = call("GET", "/api/dashboard/assessment?month=" + datetime.now().strftime("%Y-%m"), toks["street"])
+fac = [f for f in r["data"]["facilities"] if f["user_name"] in ("王强", "赵敏")]
+check("考核含物业设施责任人维度", len(fac) == 2)
+wq = next(f for f in fac if f["user_name"] == "王强")
+check("设施责任人复查合格率与投诉变化入考核", wq["rect_verified"] >= 2 and wq["recheck_pass_rate"] == 100.0 and wq["rect_overdue"] == 0)
+
+# 15.5 消杀队重复临时处理 → 自动生成物业整改
+chem = call("GET", "/api/chemicals", toks["operator"])[1]["data"][0]
+call("POST", f"/api/chemicals/{chem['id']}/restock", toks["street"], {"amount": 100})
+future = (datetime.now() + timedelta(days=5)).strftime("%Y-%m-%d")
+call("POST", f"/api/teams/1/schedules", toks["street"], {"work_date": future, "shift": "allday", "max_orders": 5})
+s, r = call("POST", "/api/reports", toks["property"], {
+    "type": "basement_damp", "location_desc": "地下车库 B3 排水沟", "nearby_population": "车主", "has_pets": False,
+    "description": "排水沟长期积水返味，消杀后反复"})
+check("地下室潮湿上报", s == 200)
+call("POST", "/api/dispatch/generate", toks["street"], {"date": datetime.now().strftime("%Y-%m-%d")})
+cand = call("GET", "/api/work-orders?community_id=1&status=assigned", toks["street"])[1]["data"]
+cand += call("GET", "/api/work-orders?community_id=1&status=pending", toks["street"])[1]["data"]
+b3_oid = None
+for o in cand:
+    dd = call("GET", "/api/work-orders/" + str(o["id"]), toks["street"])[1]["data"]
+    if dd.get("water_point") and dd["water_point"]["location_desc"] == "地下车库 B3 排水沟":
+        b3_oid = o["id"]
+        if o["status"] in ("pending", "assigned") and (not o["team_name"]):
+            call("POST", f"/api/work-orders/{b3_oid}/assign", toks["street"], {"team_id": 1, "scheduled_date": future})
+        break
+check("B3 排水沟已派单", b3_oid is not None, f"(工单 {b3_oid})")
+call("POST", f"/api/work-orders/{b3_oid}/start", toks["operator"], {})
+s, r = call("POST", f"/api/work-orders/{b3_oid}/property-rectifications", toks["operator"], {})
+check("未做临时处理前转整改被拒绝(409)", s == 409)
+call("POST", f"/api/work-orders/{b3_oid}/treatments", toks["operator"], {
+    "chemical_id": chem["id"], "spray_area": "B3排水沟", "chemical_used": 1.0,
+    "warning_sign": True, "resident_notified": True, "pet_avoided": True})
+dd = call("GET", "/api/work-orders/" + str(b3_oid), toks["street"])[1]["data"]
+check("首次临时处理不自动建档", len(dd["property_rectifications"]) == 0)
+call("POST", f"/api/work-orders/{b3_oid}/treatments", toks["operator"], {
+    "chemical_id": chem["id"], "spray_area": "B3排水沟再次投药", "chemical_used": 1.0,
+    "warning_sign": True, "resident_notified": True, "pet_avoided": True})
+dd = call("GET", "/api/work-orders/" + str(b3_oid), toks["street"])[1]["data"]
+autos = dd["property_rectifications"]
+check("第2次临时处理自动生成物业整改任务（含责任人/复查日期/临时处理2次）",
+      len(autos) == 1 and autos[0]["facility_name"] == "王强" and autos[0]["recheck_date_str"] and "王强" in autos[0]["facility_name"])
+auto = autos[0]
+check("自动建档进入工单时间线", any("生成物业整改任务" in l["action"] for l in dd["logs"]))
+s, r = call("POST", f"/api/work-orders/{b3_oid}/property-rectifications", toks["operator"], {})
+check("同一积水点不重复建档(409)", s == 409)
+# 非地下室积水点 → 拒绝（动态选取一个未闭环且非地下室积水点的工单）
+non_base_oid = None
+for o in call("GET", "/api/work-orders", toks["street"])[1]["data"]:
+    if o["status"] == "closed" or not o.get("water_point_id"):
+        continue
+    od = call("GET", "/api/work-orders/" + str(o["id"]), toks["street"])[1]["data"]
+    wp = od.get("water_point") or {}
+    if wp.get("type") not in ("basement_damp", "underground_garage"):
+        non_base_oid = o["id"]
+        break
+check("存在非地下室积水点工单用于负例", non_base_oid is not None)
+if non_base_oid:
+    s, r = call("POST", f"/api/work-orders/{non_base_oid}/property-rectifications", toks["street"], {})
+    check("非地下室积水点转整改被拒绝(400)", s == 400)
+# 自动任务流转闭环
+call("POST", f"/api/property-rectifications/{auto['id']}/start", toks["property"], {})
+s, r = call("POST", f"/api/property-rectifications/{auto['id']}/complete", toks["property"], {
+    "repair_desc": "重做B3排水沟找坡", "repair_method": "rebuild_drain",
+    "rectify_photos": ["https://example.com/auto-1.jpg"], "rectify_photo_remark": "位置：B3排水沟起点；处理方式：重做找坡"})
+check("自动任务物业完成整改", s == 200)
+s, r = call("POST", f"/api/property-rectifications/{auto['id']}/recheck", toks["grid"], {
+    "pass": True, "recheck_photos": ["https://example.com/auto-rc.jpg"], "recheck_remark": "按图核验无积水"})
+check("自动任务复查通过、投诉下降", s == 200 and r["data"]["complaints_after"] == 0)
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

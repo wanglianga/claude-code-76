@@ -327,4 +327,60 @@ CREATE TABLE IF NOT EXISTS pet_complaints (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_pet_complaints_community ON pet_complaints(community_id, status, created_at);
+
+-- ========== 物业积水整改（地下室排水沟长期积水等设施性积水） ==========
+-- 消杀队对地下室排水沟长期积水只能临时处理，服务据此生成物业整改任务，
+-- 记录排水维修、复查照片、居民投诉变化；超期影响物业考核，街道可跟进督办。
+CREATE TABLE IF NOT EXISTS property_rectifications (
+  id BIGSERIAL PRIMARY KEY,
+  rect_no TEXT NOT NULL DEFAULT '',
+  work_order_id BIGINT REFERENCES work_orders(id),
+  water_point_id BIGINT REFERENCES water_points(id),
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  -- 积水点信息
+  water_location TEXT NOT NULL DEFAULT '',
+  water_type TEXT NOT NULL DEFAULT 'basement_drain',
+  -- 临时处理（消杀队）
+  temp_treated_by BIGINT REFERENCES users(id),
+  temp_treatment TEXT NOT NULL DEFAULT '',
+  temp_treated_at TIMESTAMPTZ,
+  temp_treatment_times INT NOT NULL DEFAULT 1,
+  -- 设施责任人 + 复查日期
+  facility_user_id BIGINT NOT NULL REFERENCES users(id),
+  recheck_date DATE NOT NULL,
+  -- 物业排水维修与整改照片（须标明积水点位置与处理方式）
+  repair_desc TEXT NOT NULL DEFAULT '',
+  repair_method TEXT NOT NULL DEFAULT '',
+  rectify_photos JSONB NOT NULL DEFAULT '[]',
+  rectify_photo_remark TEXT NOT NULL DEFAULT '',
+  rectified_by BIGINT REFERENCES users(id),
+  rectified_at TIMESTAMPTZ,
+  -- 复查（复查人员按图核验）
+  recheck_photos JSONB NOT NULL DEFAULT '[]',
+  recheck_remark TEXT NOT NULL DEFAULT '',
+  rechecked_by BIGINT REFERENCES users(id),
+  rechecked_at TIMESTAMPTZ,
+  recheck_result TEXT NOT NULL DEFAULT '',
+  -- 居民投诉基线/当前（随同位置投诉自动统计）
+  complaints_before INT NOT NULL DEFAULT 0,
+  complaints_after INT NOT NULL DEFAULT 0,
+  -- 状态 / 督办
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending|rectifying|recheck_pending|verified|rejected
+  created_by BIGINT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_prop_rect_community ON property_rectifications(community_id, status);
+CREATE INDEX IF NOT EXISTS idx_prop_rect_facility ON property_rectifications(facility_user_id, status);
+
+-- 街道/系统对整改、复查超期的督办提醒
+CREATE TABLE IF NOT EXISTS property_rect_reminders (
+  id BIGSERIAL PRIMARY KEY,
+  rectification_id BIGINT NOT NULL REFERENCES property_rectifications(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'supervise',  -- rect_overdue 整改超期 | recheck_overdue 复查超期 | supervise 街道督办
+  content TEXT NOT NULL DEFAULT '',
+  raised_by BIGINT REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_prop_rect_reminders ON property_rect_reminders(rectification_id);
 `

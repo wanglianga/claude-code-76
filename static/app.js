@@ -33,7 +33,7 @@ const STATUS_COLOR = {
   pending: 'b-orange', assigned: 'b-blue', in_progress: 'b-blue', recheck_pending: 'b-purple',
   rectifying: 'b-orange', escalated: 'b-red', closed: 'b-green', cleared: 'b-green', treating: 'b-blue',
   dispatched: 'b-blue', processing: 'b-blue', open: 'b-red', resolved: 'b-green',
-  done: 'b-purple', verified: 'b-green',
+  done: 'b-purple', verified: 'b-green', rejected: 'b-red',
 };
 function badge(text, color) { return `<span class="badge ${color || 'b-gray'}">${esc(text)}</span>`; }
 function sBadge(status, label) { return badge(label || status, STATUS_COLOR[status]); }
@@ -88,21 +88,21 @@ const TABS = {
     ['report', '上报问题'], ['reports', '我的上报'], ['pets', '宠物投诉'], ['zones', '儿童活动区'], ['notices', '居民告知'],
   ],
   property: [
-    ['report', '上报问题'], ['rects', '整改任务'], ['orders', '小区工单'], ['notices', '居民告知'],
+    ['report', '上报问题'], ['rects', '整改任务'], ['prects', '积水整改'], ['orders', '小区工单'], ['notices', '居民告知'],
   ],
   grid: [
-    ['report', '上报问题'], ['points', '积水点管理'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
+    ['report', '上报问题'], ['points', '积水点管理'], ['prects', '积水整改'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
   ],
   operator: [
-    ['orders', '我的工单'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
+    ['orders', '我的工单'], ['prects', '积水整改'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
   ],
   street: [
-    ['dispatch', '派单中心'], ['orders', '工单总览'], ['points', '积水点'], ['keylist', '重点积水点'],
+    ['dispatch', '派单中心'], ['orders', '工单总览'], ['prects', '积水整改'], ['points', '积水点'], ['keylist', '重点积水点'],
     ['chems', '药剂库存'], ['sched', '排班管理'], ['rainfall', '降雨记录'], ['risk', '重点风险期'],
     ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
   ],
   supervisor: [
-    ['orders', '工单总览'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
+    ['orders', '工单总览'], ['prects', '积水整改'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
   ],
   kindergarten: [
     ['zones', '消杀计划确认'], ['notices', '居民告知'],
@@ -362,6 +362,19 @@ async function renderOrderDetail(id) {
       </div>
     </div>`;
   }
+  // 地下室排水沟长期积水 → 转物业整改（消杀队/网格员/街道）
+  if (['operator', 'grid', 'street'].includes(role) && o.status !== 'closed') {
+    const propUsers = (meta.users || []).filter(u => u.role === 'property');
+    actions += `<div class="section"><h4>地下室长期积水转物业整改（消杀队只能临时处理时）</h4>
+      <div class="inline-form">
+        ${role === 'street' ? `<select id="pr2-facility"><option value="">本小区默认物业</option>${propUsers.map(u => `<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select>` : ''}
+        <input type="date" id="pr2-date" title="复查日期">
+        <input id="pr2-repair" placeholder="排水维修要求" style="width:240px">
+        <button class="btn sm orange" onclick="createOrderPRect(${id})">转物业整改</button>
+      </div>
+      <div style="font-size:12px;color:#90a4ae;margin-top:6px">仅关联地下室/地下车库积水点、且消杀队已提交过临时处理记录的工单可转；同一积水点反复消杀时系统也会自动生成。</div>
+    </div>`;
+  }
   // 异常上报（所有角色）
   if (o.status !== 'closed') {
     actions += `<div class="section"><h4>异常上报（居民拒绝入户 / 儿童活动区时段 / 宠物投诉 / 药剂不足 / 物业设施 / 仍有幼虫）</h4>
@@ -461,6 +474,19 @@ async function renderOrderDetail(id) {
           ? `<span class="inline-form"><input id="verify-${r.id}" placeholder="核验意见"><button class="btn sm" onclick="verifyRect(${id},${r.id},true)">通过</button><button class="btn sm red" onclick="verifyRect(${id},${r.id},false)">不通过</button></span>` : ''}
         </td></tr>`).join('')}
     </table></div></div>` : ''}
+    ${(d.property_rectifications || []).length ? `<div class="section"><h4>物业积水整改（地下室排水沟长期积水）</h4><div class="table-wrap"><table>
+      <tr><th>单号</th><th>积水点位置</th><th>设施责任人</th><th>复查日期</th><th>处理方式</th><th>投诉变化</th><th>状态</th><th>操作</th></tr>
+      ${d.property_rectifications.map(p => `<tr>
+        <td>${esc(p.rect_no)}</td><td>${esc(p.water_type_label)}<br><b>${esc(p.water_location)}</b></td>
+        <td>${esc(p.facility_name)}</td>
+        <td>${esc(p.recheck_date_str)}${p.rect_overdue ? '<br>' + badge('整改超期', 'b-red') : ''}${p.recheck_overdue ? '<br>' + badge('复查超期', 'b-red') : ''}</td>
+        <td>${esc(p.repair_method_label || '-')}</td>
+        <td>${p.complaints_before} → ${p.complaints_after}</td>
+        <td>${pBadge(p.status, p.status_label)}</td>
+        <td>${['property', 'grid', 'operator', 'street', 'supervisor'].includes(role)
+          ? `<button class="btn sm" onclick="closeModal();switchTab('prects');setTimeout(()=>openPRect(${p.id}),200)">详情</button>` : '-'}</td>
+      </tr>`).join('')}
+    </table></div></div>` : ''}
     ${actions}
     <div class="section"><h4>处理时间线</h4><div class="timeline">
       ${d.logs.map(l => `<div class="t-item"><b>${esc(l.action)}</b> ${esc(l.content || '')}
@@ -510,6 +536,15 @@ async function createRect(id) {
     toast(r.message); renderOrderDetail(id);
   });
 }
+async function createOrderPRect(id) {
+  await run(async () => {
+    const body = { repair_desc: val('pr2-repair') };
+    if (val('pr2-date')) body.recheck_date = val('pr2-date');
+    if (document.getElementById('pr2-facility') && val('pr2-facility')) body.facility_user_id = parseInt(val('pr2-facility'));
+    const r = await api(`/api/work-orders/${id}/property-rectifications`, { method: 'POST', body });
+    toast(r.message); renderOrderDetail(id);
+  });
+}
 async function verifyRect(orderId, rectId, pass) {
   await run(async () => {
     const r = await api(`/api/rectifications/${rectId}/verify`, { method: 'POST', body: { pass, notes: val('verify-' + rectId) } });
@@ -545,6 +580,192 @@ async function renderRects(el) {
   </table></div></div>`;
 }
 async function rectAction(id, action) { await run(async () => { const r = await api(`/api/rectifications/${id}/${action}`, { method: 'POST', body: {} }); toast(r.message); switchTab('rects'); }); }
+
+/* ---------- 物业积水整改（地下室排水沟长期积水） ---------- */
+const PRECT_COLOR = { pending: 'b-orange', rectifying: 'b-blue', recheck_pending: 'b-purple', verified: 'b-green', rejected: 'b-red' };
+function pBadge(s, label) { return badge(label || s, PRECT_COLOR[s] || 'b-gray'); }
+
+async function renderPRects(el) {
+  const role = me.role;
+  const canCreate = ['street', 'grid'].includes(role);
+  el.innerHTML = `
+  ${canCreate ? `<div class="card"><h3>地下室积水建档并下发物业整改</h3>
+    <div class="form-grid">
+      <div class="form-item"><label>小区 ${role === 'grid' ? '' : '*'}</label><select id="pr-comm" ${role === 'grid' ? 'disabled' : ''}>${commOpts(me.community_id)}</select></div>
+      <div class="form-item"><label>积水点位置 *</label><input id="pr-loc" placeholder="如：地下车库 B2 层排水沟 / 集水井"></div>
+      <div class="form-item"><label>设施责任人（物业）</label><select id="pr-facility"><option value="">本小区默认物业</option>${
+        (meta.users || []).filter(u => u.role === 'property').map(u => `<option value="${u.id}">${esc(u.name)}${u.community_id ? '' : ''}</option>`).join('')}</select></div>
+      <div class="form-item"><label>复查日期</label><input type="date" id="pr-date"></div>
+      <div class="form-item full"><label>排水维修要求</label><input id="pr-repair" placeholder="如：疏通排水沟、检修排水泵，根治长期积水"></div>
+    </div>
+    <div class="btn-row"><button class="btn" onclick="createPRect()">下发整改任务</button></div>
+    <div style="font-size:12px;color:#90a4ae;margin-top:8px">消杀队对地下室排水沟长期积水重复临时处理时，系统也会自动生成整改任务，带上设施责任人与复查日期。</div>
+  </div>` : ''}
+  <div class="card"><h3>物业积水整改（临时处理 → 排水维修 → 按图复查；超期影响物业考核，街道可督办）</h3>
+    <div class="filter-row">
+      <select id="prf-status"><option value="">全部状态</option>${opts(meta.prop_rect_status_labels)}</select>
+      <label><input type="checkbox" id="prf-overdue"> 仅看超期</label>
+      <button class="btn sm" onclick="loadPRects()">查询</button>
+    </div>
+    <div id="prects-table"></div>
+  </div>`;
+  await loadPRects();
+}
+async function loadPRects() {
+  let q = '/api/property-rectifications?';
+  const stEl = document.getElementById('prf-status');
+  if (stEl && stEl.value) q += 'status=' + stEl.value + '&';
+  if (document.getElementById('prf-overdue') && document.getElementById('prf-overdue').checked) q += 'overdue=1';
+  const list = await api(q);
+  document.getElementById('prects-table').innerHTML = `<div class="table-wrap"><table>
+    <tr><th>单号</th><th>小区</th><th>积水点位置</th><th>临时处理</th><th>设施责任人</th><th>复查日期</th><th>居民投诉变化</th><th>状态</th><th>操作</th></tr>
+    ${list.map(p => `<tr style="${(p.rect_overdue || p.recheck_overdue) ? 'background:#fff5f5' : ''}">
+      <td>${esc(p.rect_no)}</td><td>${esc(p.community_name)}</td>
+      <td>${esc(p.water_type_label)}<br><b>${esc(p.water_location)}</b></td>
+      <td>${p.temp_treatment_times} 次${p.temp_treated_by_name ? '<br><span style="font-size:11px;color:#90a4ae">' + esc(p.temp_treated_by_name) + '</span>' : ''}</td>
+      <td>${esc(p.facility_name)}${p.facility_phone ? '<br><span style="font-size:11px;color:#90a4ae">' + esc(p.facility_phone) + '</span>' : ''}</td>
+      <td>${esc(p.recheck_date_str)}
+        ${p.rect_overdue ? '<br>' + badge('整改超期', 'b-red') : ''}${p.recheck_overdue ? '<br>' + badge('复查超期', 'b-red') : ''}
+        ${p.supervise_count ? '<br>' + badge('督办×' + p.supervise_count, 'b-orange') : ''}</td>
+      <td>${p.status === 'verified' || p.status === 'rejected' || p.complaints_after > 0
+        ? `${p.complaints_before} → ${p.complaints_after} ` + (p.complaint_decreased === null || p.complaint_decreased === undefined ? '' : (p.complaint_decreased ? badge('下降', 'b-green') : badge('未下降', 'b-red')))
+        : `基线 ${p.complaints_before} 起`}</td>
+      <td>${pBadge(p.status, p.status_label)}</td>
+      <td><button class="btn sm" onclick="openPRect(${p.id})">详情</button></td>
+    </tr>`).join('') || '<tr><td colspan="9">暂无积水整改任务</td></tr>'}
+  </table></div>`;
+}
+async function createPRect() {
+  await run(async () => {
+    const body = {
+      community_id: parseInt(val('pr-comm')) || (me.community_id || 0),
+      water_location: val('pr-loc'),
+      repair_desc: val('pr-repair'),
+    };
+    if (val('pr-facility')) body.facility_user_id = parseInt(val('pr-facility'));
+    if (val('pr-date')) body.recheck_date = val('pr-date');
+    const r = await api('/api/property-rectifications', { method: 'POST', body });
+    toast(r.message); switchTab('prects');
+  });
+}
+async function openPRect(id) {
+  document.getElementById('modal-mask').classList.remove('hidden');
+  document.getElementById('modal-body').innerHTML = '加载中...';
+  await run(() => renderPRectDetail(id));
+}
+async function renderPRectDetail(id) {
+  const p = await api('/api/property-rectifications/' + id);
+  const role = me.role;
+  const photos = (arr) => (arr || []).map(u => `<a href="${esc(u)}" target="_blank" style="display:inline-block;margin:2px 6px 2px 0">📷 ${esc(u.split('/').pop())}</a>`).join('') || '暂无';
+
+  let actions = '';
+  if (role === 'property' && p.facility_user_id === me.id) {
+    if (['pending', 'rejected'].includes(p.status)) {
+      actions += `<div class="btn-row"><button class="btn" onclick="pRectAction(${id},'start')">受理整改（进场维修排水设施）</button></div>`;
+    }
+    if (['pending', 'rectifying', 'rejected'].includes(p.status)) {
+      actions += `<div class="section"><h4>完成排水整改（整改照片须标明积水点位置与处理方式，供复查人员按图核验）</h4>
+        <div class="form-grid">
+          <div class="form-item"><label>处理方式 *</label><select id="pc-method">${opts(meta.prop_rect_method_labels)}</select></div>
+          <div class="form-item full"><label>排水维修情况 *</label><input id="pc-repair" placeholder="如：清掏排水沟淤积、更换排水泵，沟通后无积水"></div>
+          <div class="form-item full"><label>整改照片链接 *（多个用英文逗号分隔）</label><input id="pc-photos" placeholder="https://.../before.jpg, https://.../after.jpg"></div>
+          <div class="form-item full"><label>照片标注说明 *（积水点位置 + 处理方式）</label><textarea id="pc-remark" placeholder="如：照片①位置=B2排水沟起点（红圈标注积水点），处理方式=疏通；照片②位置=集水井，处理方式=更换排水泵后复拍"></textarea></div>
+        </div>
+        <div class="btn-row"><button class="btn orange" onclick="submitPRectComplete(${id})">提交整改完成，转复查</button></div>
+      </div>`;
+    }
+  }
+  if (['operator', 'grid', 'street', 'supervisor'].includes(role) && p.status === 'recheck_pending') {
+    actions += `<div class="section"><h4>复查核验（对照整改照片按图核验同一积水点）</h4>
+      <div class="form-grid">
+        <div class="form-item full"><label>复查照片链接 *（多个用英文逗号分隔）</label><input id="pv-photos" placeholder="https://.../recheck.jpg"></div>
+        <div class="form-item full"><label>复查意见</label><textarea id="pv-remark" placeholder="对照整改照片同一位置/角度核验：排水沟是否已无积水、无孑孓"></textarea></div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" onclick="submitPRectRecheck(${id},true)">按图核验通过（积水清除）</button>
+        <button class="btn red" onclick="submitPRectRecheck(${id},false)">不通过（退回返工）</button>
+      </div>
+    </div>`;
+  }
+  if (role === 'street' && p.status !== 'verified') {
+    actions += `<div class="section"><h4>街道督办（整改/复查超期时提示督办，并通知物业负责人）</h4>
+      <div class="inline-form">
+        <input id="ps-content" placeholder="督办意见，如：请于 2 日内完成 B2 排水沟维修，否则纳入物业考核扣分" style="width:420px">
+        <button class="btn sm orange" onclick="submitPRectSupervise(${id})">发出督办</button>
+      </div>
+    </div>`;
+  }
+  if (p.work_order_id) {
+    actions += `<div class="btn-row"><button class="btn sm gray" onclick="openOrder(${p.work_order_id})">查看关联工单</button></div>`;
+  }
+
+  document.getElementById('modal-body').innerHTML = `
+    <span class="close-x" onclick="closeModal()">✕</span>
+    <h2>积水整改 ${esc(p.rect_no)} ${pBadge(p.status, p.status_label)}</h2>
+    <div class="sub">${esc(p.community_name)} ｜ 创建 ${fmtT(p.created_at)} ｜ 复查日期 <b>${esc(p.recheck_date_str)}</b>
+      ${p.rect_overdue ? badge('整改超期', 'b-red') : ''}${p.recheck_overdue ? badge('复查超期', 'b-red') : ''}</div>
+    <div class="kv">
+      <div><span class="k">积水点：</span>${esc(p.water_type_label)} · <b>${esc(p.water_location)}</b></div>
+      <div><span class="k">设施责任人：</span>${esc(p.facility_name)} ${esc(p.facility_phone)}</div>
+      ${p.order_no ? `<div><span class="k">关联工单：</span>${esc(p.order_no)}</div>` : ''}
+    </div>
+    <div class="section"><h4>消杀队临时处理（仅临时抑制，未根治设施积水）</h4><div class="kv">
+      <div><span class="k">临时处理：</span>${esc(p.temp_treatment || '-')}</div>
+      <div><span class="k">处理次数：</span>${p.temp_treatment_times} 次（${esc(p.temp_treated_by_name || '-')}，${fmtT(p.temp_treated_at)}）</div>
+    </div></div>
+    <div class="section"><h4>物业排水维修 / 整改照片（标明位置与处理方式）</h4>
+      ${p.repair_desc ? `<div class="kv">
+        <div><span class="k">处理方式：</span>${esc(p.repair_method_label)}</div>
+        <div style="grid-column:1/-1"><span class="k">维修情况：</span>${esc(p.repair_desc)}</div>
+        <div style="grid-column:1/-1"><span class="k">整改照片：</span>${photos(p.rectify_photos)}</div>
+        <div style="grid-column:1/-1"><span class="k">照片标注：</span>${esc(p.rectify_photo_remark || '-')}</div>
+        <div><span class="k">整改人：</span>${esc(p.rectified_by_name || '-')} ${fmtT(p.rectified_at)}</div>
+      </div>` : '<div style="color:#90a4ae">物业尚未提交整改</div>'}
+    </div>
+    <div class="section"><h4>复查（复查人员按图核验）</h4>
+      ${p.rechecked_at ? `<div class="kv">
+        <div><span class="k">结果：</span>${p.recheck_result === 'pass' ? badge('按图核验通过', 'b-green') : badge('不通过/返工', 'b-red')}</div>
+        <div><span class="k">复查人：</span>${esc(p.rechecked_by_name || '-')} ${fmtT(p.rechecked_at)}</div>
+        <div style="grid-column:1/-1"><span class="k">复查照片：</span>${photos(p.recheck_photos)}</div>
+        <div style="grid-column:1/-1"><span class="k">复查意见：</span>${esc(p.recheck_remark || '-')}</div>
+      </div>` : '<div style="color:#90a4ae">待复查人员对照整改照片按图核验</div>'}
+    </div>
+    <div class="section"><h4>居民投诉变化</h4>
+      <div>整改前 60 天同位置投诉 <b>${p.complaints_before}</b> 起 → 复查时 <b>${p.complaints_after}</b> 起
+      ${p.complaint_decreased === null || p.complaint_decreased === undefined ? '' : (p.complaint_decreased ? badge('投诉下降', 'b-green') : badge('投诉未下降', 'b-red'))}</div>
+    </div>
+    <div class="section"><h4>超期提示与街道督办</h4>
+      ${(p.reminders || []).length ? p.reminders.map(m => `<div class="banner ${m.kind === 'supervise' ? '' : 'danger'}" style="margin-bottom:8px">
+        ${badge(m.kind_label, m.kind === 'supervise' ? 'b-orange' : 'b-red')} ${esc(m.content)}
+        <div class="t-meta">${fmtT(m.created_at)}${m.raised_by_name ? ' ｜ ' + esc(m.raised_by_name) : ''}</div></div>`).join('') : '<div style="color:#90a4ae">暂无超期/督办记录</div>'}
+    </div>
+    ${actions}`;
+}
+async function pRectAction(id, action) {
+  await run(async () => { const r = await api(`/api/property-rectifications/${id}/${action}`, { method: 'POST', body: {} }); toast(r.message); renderPRectDetail(id); });
+}
+async function submitPRectComplete(id) {
+  await run(async () => {
+    const photos = val('pc-photos') ? val('pc-photos').split(',').map(s => s.trim()).filter(Boolean) : [];
+    const r = await api(`/api/property-rectifications/${id}/complete`, { method: 'POST', body: {
+      repair_desc: val('pc-repair'), repair_method: val('pc-method'), rectify_photos: photos, rectify_photo_remark: val('pc-remark'),
+    } });
+    toast(r.message); renderPRectDetail(id);
+  });
+}
+async function submitPRectRecheck(id, pass) {
+  await run(async () => {
+    const photos = val('pv-photos') ? val('pv-photos').split(',').map(s => s.trim()).filter(Boolean) : [];
+    const r = await api(`/api/property-rectifications/${id}/recheck`, { method: 'POST', body: { pass, recheck_photos: photos, recheck_remark: val('pv-remark') } });
+    toast(r.message); renderPRectDetail(id);
+  });
+}
+async function submitPRectSupervise(id) {
+  await run(async () => {
+    const r = await api(`/api/property-rectifications/${id}/supervise`, { method: 'POST', body: { content: val('ps-content') } });
+    toast(r.message); renderPRectDetail(id);
+  });
+}
 
 /* ---------- 居民告知 ---------- */
 async function renderNotices(el) {
@@ -710,12 +931,15 @@ async function renderLoop(el) {
   el.innerHTML = `
   ${rp ? `<div class="banner danger">⚠️「${esc(rp.name)}」生效中：复查间隔 ${data.recheck_interval_days} 天，重点积水点加密复查。</div>` : ''}
   <div class="card"><h3>各小区「投诉 → 派单 → 消杀 → 复查 → 整改 → 闭环」进度</h3><div class="table-wrap"><table>
-    <tr><th>小区</th><th>投诉</th><th>待派单</th><th>工单</th><th>已消杀</th><th>已复查</th><th>复查通过</th><th>复查逾期</th><th>整改中</th><th>整改已核验</th><th>已闭环</th><th>闭环率</th><th>重点积水点</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th></tr>
+    <tr><th>小区</th><th>投诉</th><th>待派单</th><th>工单</th><th>已消杀</th><th>已复查</th><th>复查通过</th><th>复查逾期</th><th>整改中</th><th>整改已核验</th><th>积水整改</th><th>整改超期</th><th>积水已复查</th><th>已闭环</th><th>闭环率</th><th>重点积水点</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th></tr>
     ${data.rows.map(r => `<tr>
       <td><b>${esc(r.community_name)}</b></td><td>${r.reports_total}</td><td>${r.reports_pending}</td>
       <td>${r.orders_total}</td><td>${r.orders_treated}</td><td>${r.orders_rechecked}</td>
       <td>${r.recheck_pass}</td><td>${r.recheck_overdue ? badge(r.recheck_overdue + ' 单', 'b-red') : 0}</td>
       <td>${r.rectifications_open}</td><td>${r.rectifications_verified}</td>
+      <td>${r.prop_rect_open || 0}</td>
+      <td>${r.prop_rect_overdue ? badge(r.prop_rect_overdue + ' 单', 'b-red') : 0}</td>
+      <td>${r.prop_rect_verified || 0}</td>
       <td>${r.orders_closed}</td><td><b>${r.close_rate.toFixed(0)}%</b></td>
       <td>${r.key_water_points ? badge(r.key_water_points + ' 处', 'b-red') : 0}</td>
       <td>${r.complaints_this_month}</td><td>${r.complaints_last_month}</td>
@@ -743,7 +967,7 @@ async function loadAssess() {
   const data = await api('/api/dashboard/assessment?month=' + document.getElementById('as-month').value);
   document.getElementById('assess-body').innerHTML = `
   <h4 style="margin:8px 0;color:#33691e">小区维度</h4><div class="table-wrap"><table>
-    <tr><th>小区</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th><th>闭环工单</th><th>平均闭环时长</th><th>复查通过率</th><th>药剂消耗</th><th>物业设施问题</th><th>整改核验</th></tr>
+    <tr><th>小区</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th><th>闭环工单</th><th>平均闭环时长</th><th>复查通过率</th><th>药剂消耗</th><th>物业设施问题</th><th>整改核验</th><th>积水整改(新)</th><th>整改超期</th></tr>
     ${data.communities.map(r => `<tr>
       <td><b>${esc(r.community_name)}</b></td><td>${r.complaints}</td><td>${r.complaints_prev}</td>
       <td>${r.complaints_prev ? (r.complaint_decline_pct >= 0 ? badge('↓' + r.complaint_decline_pct.toFixed(0) + '%', 'b-green') : badge('↑' + (-r.complaint_decline_pct).toFixed(0) + '%', 'b-red')) : '-'}</td>
@@ -752,7 +976,20 @@ async function loadAssess() {
       <td>${r.chemical_used.toFixed(1)}</td>
       <td>${r.property_facility_issues ? badge(r.property_facility_issues + ' 起', 'b-orange') : 0}</td>
       <td>${r.rectifications_verified}/${r.rectifications_total}</td>
+      <td>${r.prop_rect_verified || 0}/${r.prop_rect_total || 0}${r.prop_rect_recheck_fail ? ' ' + badge('返工' + r.prop_rect_recheck_fail, 'b-red') : ''}</td>
+      <td>${r.prop_rect_overdue ? badge(r.prop_rect_overdue + ' 起', 'b-red') : 0}</td>
     </tr>`).join('')}
+  </table></div>
+  <h4 style="margin:16px 0 8px;color:#33691e">物业设施责任人维度（地下室积水整改超期影响物业考核）</h4><div class="table-wrap"><table>
+    <tr><th>设施责任人</th><th>小区</th><th>积水整改任务</th><th>已复查通过</th><th>复查合格率</th><th>整改/复查超期</th><th>街道督办</th><th>投诉变化(前→后)</th></tr>
+    ${(data.facilities || []).map(f => `<tr>
+      <td><b>${esc(f.user_name)}</b></td><td>${esc(f.community_name)}</td>
+      <td>${f.rect_total}</td><td>${f.rect_verified}</td>
+      <td>${(f.rect_verified + f.recheck_fail) ? f.recheck_pass_rate.toFixed(0) + '%' : '-'}</td>
+      <td>${f.rect_overdue ? badge(f.rect_overdue + ' 起超期', 'b-red') : badge('无超期', 'b-green')}</td>
+      <td>${f.supervise_count ? badge(f.supervise_count + ' 次', 'b-orange') : 0}</td>
+      <td>${f.complaints_before} → ${f.complaints_after} ${f.complaint_delta < 0 ? badge('↓投诉下降', 'b-green') : (f.complaint_delta > 0 ? badge('↑投诉上升', 'b-red') : '持平')}</td>
+    </tr>`).join('') || '<tr><td colspan="8">本月暂无积水整改任务</td></tr>'}
   </table></div>
   <h4 style="margin:16px 0 8px;color:#33691e">消杀队维度</h4><div class="table-wrap"><table>
     <tr><th>消杀队</th><th>接单数</th><th>消杀次数</th><th>药剂消耗</th><th>复查通过率</th></tr>
@@ -1059,6 +1296,7 @@ const TAB_RENDERERS = {
   dispatch: renderDispatch,
   orders: renderOrders,
   rects: renderRects,
+  prects: renderPRects,
   notices: renderNotices,
   chems: renderChems,
   sched: renderSched,

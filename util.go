@@ -247,6 +247,32 @@ var RectificationStatusLabels = map[string]string{
 	"verified":    "已核验",
 }
 
+// 物业积水整改任务状态
+var PropRectStatusLabels = map[string]string{
+	"pending":         "待整改",
+	"rectifying":      "整改中",
+	"recheck_pending": "待复查",
+	"verified":        "复查通过",
+	"rejected":        "复查不通过",
+}
+
+// 地下室排水沟长期积水 —— 物业排水维修/处理方式
+var PropRectMethodLabels = map[string]string{
+	"dredge_drain":   "疏通排水沟/集水井",
+	"repair_pipe":    "维修破损排水管",
+	"rebuild_drain":  "改造排水坡度/重建排水沟",
+	"replace_pump":   "检修/更换排水泵",
+	"seal_leak":      "封堵渗漏点",
+	"other":          "其他工程措施",
+}
+
+// 物业积水整改督办提醒类型
+var PropRectReminderKindLabels = map[string]string{
+	"rect_overdue":    "整改超期",
+	"recheck_overdue": "复查超期",
+	"supervise":       "街道督办",
+}
+
 var IssueStatusLabels = map[string]string{
 	"open":     "待处理",
 	"resolved": "已解决",

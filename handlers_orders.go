@@ -489,6 +489,56 @@ func hGetOrder(c *Ctx) {
 	}
 	detail["rectifications"] = rects
 
+	// 物业积水整改（地下室排水沟长期积水等设施性积水）
+	type PPropRect struct {
+		ID                int64   `json:"id"`
+		RectNo            string  `json:"rect_no"`
+		WaterLocation     string  `json:"water_location"`
+		WaterTypeLabel    string  `json:"water_type_label"`
+		FacilityName      string  `json:"facility_name"`
+		RecheckDateStr    string  `json:"recheck_date_str"`
+		Status            string  `json:"status"`
+		StatusLabel       string  `json:"status_label"`
+		RectOverdue       bool    `json:"rect_overdue"`
+		RecheckOverdue    bool    `json:"recheck_overdue"`
+		RepairMethodLabel string  `json:"repair_method_label"`
+		RectifyPhotos     StringList `json:"rectify_photos"`
+		RecheckPhotos     StringList `json:"recheck_photos"`
+		ComplaintsBefore  int     `json:"complaints_before"`
+		ComplaintsAfter   int     `json:"complaints_after"`
+	}
+	ppRects := []PPropRect{}
+	if pr, err := db.Query(`SELECT id, rect_no, water_location, water_type, facility_user_id, recheck_date, status,
+		COALESCE(repair_method,''), COALESCE(rectify_photos,'[]'::jsonb), COALESCE(recheck_photos,'[]'::jsonb),
+		complaints_before, complaints_after
+		FROM property_rectifications WHERE work_order_id=$1 ORDER BY id`, id); err == nil {
+		defer pr.Close()
+		for pr.Next() {
+			var x PPropRect
+			var facilityID int64
+			var wt string
+			var rd time.Time
+			var status string
+			pr.Scan(&x.ID, &x.RectNo, &x.WaterLocation, &wt, &facilityID, &rd, &status,
+				&x.RepairMethodLabel, &x.RectifyPhotos, &x.RecheckPhotos, &x.ComplaintsBefore, &x.ComplaintsAfter)
+			x.WaterTypeLabel = labelOf(WaterPointTypes, wt)
+			x.RepairMethodLabel = labelOf(PropRectMethodLabels, x.RepairMethodLabel)
+			db.QueryRow(`SELECT name FROM users WHERE id=$1`, facilityID).Scan(&x.FacilityName)
+			x.RecheckDateStr = rd.Format("2006-01-02")
+			x.Status = status
+			x.StatusLabel = labelOf(PropRectStatusLabels, status)
+			if rd.Before(time.Now().Truncate(24*time.Hour)) {
+				if status == "pending" || status == "rectifying" || status == "rejected" {
+					x.RectOverdue = true
+				} else if status == "recheck_pending" {
+					x.RecheckOverdue = true
+				}
+			}
+			ppRects = append(ppRects, x)
+		}
+	}
+	detail["property_rectifications"] = ppRects
+
 	// 时间线
 	type Log struct {
 		ActorName  *string   `json:"actor_name"`
@@ -663,6 +713,8 @@ func hCreateTreatment(c *Ctx) {
 	}
 	addLog(id, c.User, "消杀完成", fmt.Sprintf("药剂 %s（浓度 %s）用量 %.1f，喷洒区域：%s；警示牌:%v 居民告知:%v 宠物避让:%v；%d 天后复查",
 		chemName, req.Concentration, req.ChemicalUsed, req.SprayArea, req.WarningSign, req.ResidentNotified, req.PetAvoided, recheckIntervalDays()))
+	// 地下室排水沟长期积水：消杀队只能临时处理，同一积水点反复处理时系统自动生成物业整改任务
+	maybeCreatePropertyRect(id, c.User)
 	if req.NewWaterPoint {
 		addLog(id, c.User, "发现新积水点", req.NewWaterPointDesc)
 	}

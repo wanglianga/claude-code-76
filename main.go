@@ -53,6 +53,7 @@ func main() {
 	registerDashboardRoutes()
 	registerChildZoneRoutes()
 	registerPetRoutes()
+	registerPropertyRectRoutes()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(); err != nil {

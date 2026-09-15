@@ -147,6 +147,10 @@ func hClosedLoopDashboard(c *Ctx) {
 		RecheckOverdue     int     `json:"recheck_overdue"`
 		RectOpen           int     `json:"rectifications_open"`
 		RectVerified       int     `json:"rectifications_verified"`
+		PropRectTotal      int     `json:"prop_rect_total"`
+		PropRectOpen       int     `json:"prop_rect_open"`
+		PropRectOverdue    int     `json:"prop_rect_overdue"`
+		PropRectVerified   int     `json:"prop_rect_verified"`
 		OrdersClosed       int     `json:"orders_closed"`
 		CloseRate          float64 `json:"close_rate"`
 		KeyWaterPoints     int     `json:"key_water_points"`
@@ -167,6 +171,10 @@ func hClosedLoopDashboard(c *Ctx) {
 		  (SELECT count(*) FROM work_orders o WHERE o.community_id=cm.id AND o.status='recheck_pending' AND o.recheck_due_at < now()),
 		  (SELECT count(*) FROM rectifications rt JOIN work_orders o ON o.id=rt.work_order_id WHERE o.community_id=cm.id AND rt.status IN ('pending','in_progress','done')),
 		  (SELECT count(*) FROM rectifications rt JOIN work_orders o ON o.id=rt.work_order_id WHERE o.community_id=cm.id AND rt.status='verified'),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status != 'verified'),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status != 'verified' AND pr.recheck_date < current_date),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='verified'),
 		  (SELECT count(*) FROM work_orders o WHERE o.community_id=cm.id AND o.status='closed'),
 		  (SELECT count(*) FROM water_points w WHERE w.community_id=cm.id AND w.is_key AND w.status != 'cleared'),
 		  (SELECT count(*) FROM water_points w WHERE w.community_id=cm.id AND w.status != 'cleared'),
@@ -183,7 +191,9 @@ func hClosedLoopDashboard(c *Ctx) {
 		var r Row
 		if err := rows.Scan(&r.CommunityID, &r.CommunityName, &r.ReportsTotal, &r.ReportsPending,
 			&r.OrdersTotal, &r.OrdersActive, &r.OrdersTreated, &r.OrdersRechecked, &r.RecheckPass,
-			&r.RecheckOverdue, &r.RectOpen, &r.RectVerified, &r.OrdersClosed,
+			&r.RecheckOverdue, &r.RectOpen, &r.RectVerified,
+			&r.PropRectTotal, &r.PropRectOpen, &r.PropRectOverdue, &r.PropRectVerified,
+			&r.OrdersClosed,
 			&r.KeyWaterPoints, &r.OpenWaterPoints, &r.ComplaintsThisMonth, &r.ComplaintsLastMonth); err != nil {
 			jsonErr(c.W, 500, err.Error())
 			return
@@ -227,6 +237,10 @@ func hAssessment(c *Ctx) {
 		PropertyIssues      int      `json:"property_facility_issues"`
 		RectTotal           int      `json:"rectifications_total"`
 		RectVerified        int      `json:"rectifications_verified"`
+		PropRectTotal       int      `json:"prop_rect_total"`
+		PropRectOverdue     int      `json:"prop_rect_overdue"`
+		PropRectVerified    int      `json:"prop_rect_verified"`
+		PropRectRecheckFail int      `json:"prop_rect_recheck_fail"`
 	}
 	rows, err := db.Query(`
 		SELECT cm.id, cm.name,
@@ -239,7 +253,11 @@ func hAssessment(c *Ctx) {
 		  (SELECT COALESCE(sum(t.chemical_used),0) FROM treatments t JOIN work_orders o ON o.id=t.work_order_id WHERE o.community_id=cm.id AND t.created_at >= $1::date AND t.created_at < ($1::date + interval '1 month')),
 		  (SELECT count(*) FROM issues i JOIN work_orders o ON o.id=i.work_order_id WHERE o.community_id=cm.id AND i.type='property_facility' AND i.created_at >= $1::date AND i.created_at < ($1::date + interval '1 month')),
 		  (SELECT count(*) FROM rectifications rt JOIN work_orders o ON o.id=rt.work_order_id WHERE o.community_id=cm.id AND rt.created_at >= $1::date AND rt.created_at < ($1::date + interval '1 month')),
-		  (SELECT count(*) FROM rectifications rt JOIN work_orders o ON o.id=rt.work_order_id WHERE o.community_id=cm.id AND rt.status='verified' AND rt.verified_at >= $1::date AND rt.verified_at < ($1::date + interval '1 month'))
+		  (SELECT count(*) FROM rectifications rt JOIN work_orders o ON o.id=rt.work_order_id WHERE o.community_id=cm.id AND rt.status='verified' AND rt.verified_at >= $1::date AND rt.verified_at < ($1::date + interval '1 month')),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.created_at >= $1::date AND pr.created_at < ($1::date + interval '1 month')),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.created_at >= $1::date AND pr.created_at < ($1::date + interval '1 month') AND pr.recheck_date < current_date AND pr.status != 'verified'),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='verified' AND pr.rechecked_at >= $1::date AND pr.rechecked_at < ($1::date + interval '1 month')),
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='rejected' AND pr.updated_at >= $1::date AND pr.updated_at < ($1::date + interval '1 month'))
 		FROM communities cm ORDER BY cm.id`, start)
 	if err != nil {
 		jsonErr(c.W, 500, err.Error())
@@ -251,7 +269,8 @@ func hAssessment(c *Ctx) {
 		var r CommRow
 		if err := rows.Scan(&r.CommunityID, &r.CommunityName, &r.Complaints, &r.ComplaintsPrev,
 			&r.OrdersClosed, &r.AvgCloseHours, &r.RecheckTotal, &r.RecheckPass, &r.ChemicalUsed,
-			&r.PropertyIssues, &r.RectTotal, &r.RectVerified); err != nil {
+			&r.PropertyIssues, &r.RectTotal, &r.RectVerified,
+			&r.PropRectTotal, &r.PropRectOverdue, &r.PropRectVerified, &r.PropRectRecheckFail); err != nil {
 			jsonErr(c.W, 500, err.Error())
 			return
 		}
@@ -300,10 +319,78 @@ func hAssessment(c *Ctx) {
 		teamRows = append(teamRows, r)
 	}
 
+	// 物业设施责任人维度：积水整改任务数、超期数（影响物业考核）、复查合格率、督办次数、居民投诉变化
+	type FacilityRow struct {
+		UserID          int64   `json:"user_id"`
+		UserName        string  `json:"user_name"`
+		CommunityName   string  `json:"community_name"`
+		RectTotal       int     `json:"rect_total"`
+		RectOverdue     int     `json:"rect_overdue"`
+		RectVerified    int     `json:"rect_verified"`
+		RecheckFail     int     `json:"recheck_fail"`
+		RecheckPassRate float64 `json:"recheck_pass_rate"`
+		SuperviseCount  int     `json:"supervise_count"`
+		ComplaintsBefore int    `json:"complaints_before"`
+		ComplaintsAfter int     `json:"complaints_after"`
+		ComplaintDelta  int     `json:"complaint_delta"`
+	}
+	frows, err := db.Query(`
+		SELECT u.id, u.name, cm.name,
+		  count(*) AS total,
+		  count(*) FILTER (WHERE pr.status != 'verified' AND pr.recheck_date < current_date) AS overdue,
+		  count(*) FILTER (WHERE pr.status='verified') AS verified,
+		  count(*) FILTER (WHERE pr.status='rejected') AS rejected,
+		  COALESCE((SELECT count(*) FROM property_rect_reminders m WHERE m.rectification_id=pr.id AND m.kind='supervise'),0) AS supervise,
+		  COALESCE(sum(pr.complaints_before),0), COALESCE(sum(pr.complaints_after),0)
+		FROM property_rectifications pr
+		JOIN users u ON u.id=pr.facility_user_id
+		JOIN communities cm ON cm.id=pr.community_id
+		WHERE pr.created_at >= $1::date AND pr.created_at < ($1::date + interval '1 month')
+		GROUP BY u.id, u.name, cm.name, pr.id`, start)
+	if err != nil {
+		jsonErr(c.W, 500, err.Error())
+		return
+	}
+	defer frows.Close()
+	facAgg := map[int64]*FacilityRow{}
+	var order []int64
+	for frows.Next() {
+		var uid int64
+		var uname, cname string
+		var total, overdue, verified, rejected, supervise, before, after int
+		if frows.Scan(&uid, &uname, &cname, &total, &overdue, &verified, &rejected, &supervise, &before, &after) != nil {
+			continue
+		}
+		a, ok := facAgg[uid]
+		if !ok {
+			a = &FacilityRow{UserID: uid, UserName: uname, CommunityName: cname}
+			facAgg[uid] = a
+			order = append(order, uid)
+		}
+		a.RectTotal += total
+		a.RectOverdue += overdue
+		a.RectVerified += verified
+		a.RecheckFail += rejected
+		a.SuperviseCount += supervise
+		a.ComplaintsBefore += before
+		a.ComplaintsAfter += after
+	}
+	facilityRows := []FacilityRow{}
+	for _, uid := range order {
+		a := facAgg[uid]
+		finished := a.RectVerified + a.RecheckFail
+		if finished > 0 {
+			a.RecheckPassRate = float64(a.RectVerified) / float64(finished) * 100
+		}
+		a.ComplaintDelta = a.ComplaintsAfter - a.ComplaintsBefore
+		facilityRows = append(facilityRows, *a)
+	}
+
 	jsonOK(c.W, map[string]any{
 		"month":       month,
 		"communities": commRows,
 		"teams":       teamRows,
+		"facilities":  facilityRows,
 	})
 }
 
