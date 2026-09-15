@@ -301,7 +301,14 @@ func hListChildZonePlans(c *Ctx) {
 	case "kindergarten":
 		q += ` AND p.child_zone_id IN (SELECT id FROM child_zones WHERE contact_user_id=` + next() + `)`
 		args = append(args, c.User.ID)
-	case "resident", "property", "grid":
+	case "resident":
+		// 居民仅可见本小区且园方已确认的计划
+		q += ` AND p.status='confirmed'`
+		if c.User.CommunityID != nil {
+			q += ` AND p.community_id=` + next()
+			args = append(args, *c.User.CommunityID)
+		}
+	case "property", "grid":
 		if c.User.CommunityID != nil {
 			q += ` AND p.community_id=` + next()
 			args = append(args, *c.User.CommunityID)
@@ -328,6 +335,10 @@ func hListChildZonePlans(c *Ctx) {
 		if err != nil {
 			jsonErr(c.W, 500, err.Error())
 			return
+		}
+		if c.User.Role == "resident" {
+			// 居民视图不泄露园方联系电话
+			p.ContactPhone = ""
 		}
 		list = append(list, *p)
 	}
@@ -361,11 +372,68 @@ func hGetChildZonePlan(c *Ctx) {
 		jsonErr(c.W, 404, "计划不存在")
 		return
 	}
-	rows, err := db.Query(`SELECT id, plan_id, audience, channel, title, content, avoid_period, contact_info, delivery_status, sent_at, delivered_at, created_at
-		FROM zone_reminders WHERE plan_id=$1 ORDER BY id`, id)
-	if err != nil {
-		jsonErr(c.W, 500, err.Error())
+	u := c.User
+	switch u.Role {
+	case "street", "supervisor", "operator":
+		// 街道/卫生监督/消杀队：全量可读
+	case "property", "grid":
+		if u.CommunityID == nil || *u.CommunityID != p.CommunityID {
+			jsonErr(c.W, 403, "仅可查看本小区的错峰消杀计划")
+			return
+		}
+	case "kindergarten":
+		if !planBoundToUser(id, u.ID) {
+			jsonErr(c.W, 404, "计划不存在")
+			return
+		}
+	case "resident":
+		// 居民：仅本小区且园方确认后的计划，返回公开视图（安全间隔/恢复时间/避让信息），不含园方电话与提醒明细
+		if u.CommunityID == nil || *u.CommunityID != p.CommunityID || p.Status != "confirmed" {
+			jsonErr(c.W, 404, "计划不存在或未公开")
+			return
+		}
+		jsonOK(c.W, map[string]any{"plan": publicPlanView(p), "reminders": []any{}})
 		return
+	default:
+		jsonErr(c.W, 403, "无权限")
+		return
+	}
+	rems := loadPlanReminders(id)
+	jsonOK(c.W, map[string]any{"plan": p, "reminders": rems})
+}
+
+// planBoundToUser 计划所属活动区是否绑定该园方联系人
+func planBoundToUser(planID, userID int64) bool {
+	var n int
+	db.QueryRow(`SELECT count(*) FROM child_zone_plans p JOIN child_zones z ON z.id=p.child_zone_id
+		WHERE p.id=$1 AND z.contact_user_id=$2`, planID, userID).Scan(&n)
+	return n > 0
+}
+
+// publicPlanView 居民公开视图：仅安全间隔、恢复时间与避让信息
+func publicPlanView(p *ChildZonePlan) map[string]any {
+	avoid := ""
+	if p.RecoveryTime != nil {
+		avoid = fmt.Sprintf("%s ~ %s", fmtHM(p.PlannedStart), fmtHM(*p.RecoveryTime))
+	}
+	return map[string]any{
+		"plan_no":               p.PlanNo,
+		"zone_name":             p.ZoneName,
+		"zone_type_label":       p.ZoneTypeLabel,
+		"community_name":        p.CommunityName,
+		"status":                p.Status,
+		"status_label":          p.StatusLabel,
+		"safety_interval_hours": p.SafetyIntervalHours,
+		"recovery_time":         p.RecoveryTime,
+		"avoid_period":          avoid,
+	}
+}
+
+func loadPlanReminders(planID int64) []Reminder {
+	rows, err := db.Query(`SELECT id, plan_id, audience, channel, title, content, avoid_period, contact_info, delivery_status, sent_at, delivered_at, created_at
+		FROM zone_reminders WHERE plan_id=$1 ORDER BY id`, planID)
+	if err != nil {
+		return []Reminder{}
 	}
 	defer rows.Close()
 	rems := []Reminder{}
@@ -376,7 +444,7 @@ func hGetChildZonePlan(c *Ctx) {
 		r.DeliveryLabel = labelOf(DeliveryStatusLabels, r.DeliveryStatus)
 		rems = append(rems, r)
 	}
-	jsonOK(c.W, map[string]any{"plan": p, "reminders": rems})
+	return rems
 }
 
 func hSendReminders(c *Ctx) {
@@ -401,6 +469,31 @@ func hDeliverReminder(c *Ctx) {
 	}
 	rid, ok := pathID(c, "rid")
 	if !ok {
+		return
+	}
+	// 归属校验：仅对应幼儿园联系人、街道、实际作业消杀队（关联工单所属队）可更新送达状态
+	var communityID int64
+	var contactUserID, orderTeamID *int64
+	if err := db.QueryRow(`SELECT p.community_id, z.contact_user_id, o.team_id
+		FROM child_zone_plans p
+		JOIN child_zones z ON z.id=p.child_zone_id
+		LEFT JOIN work_orders o ON o.id=p.work_order_id
+		WHERE p.id=$1`, id).Scan(&communityID, &contactUserID, &orderTeamID); err != nil {
+		jsonErr(c.W, 404, "计划不存在")
+		return
+	}
+	u := c.User
+	allowed := false
+	switch u.Role {
+	case "street":
+		allowed = true
+	case "kindergarten":
+		allowed = contactUserID != nil && *contactUserID == u.ID
+	case "operator":
+		allowed = orderTeamID != nil && u.TeamID != nil && *orderTeamID == *u.TeamID
+	}
+	if !allowed {
+		jsonErr(c.W, 403, "仅对应幼儿园联系人、街道或实际作业消杀队可更新送达状态")
 		return
 	}
 	res, err := db.Exec(`UPDATE zone_reminders SET delivery_status='delivered', delivered_at=now()

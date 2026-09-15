@@ -227,5 +227,52 @@ s, r = call("GET", "/api/notifications", toks["resident"])
 rec_notice = next((n for n in r["data"] if "儿童活动恢复" in (n["title"] or "")), None)
 check("居民端可见安全间隔与恢复时间", rec_notice and "安全间隔" in rec_notice["content"] and "恢复时间" in rec_notice["content"])
 
+print("== 12. 计划详情与提醒送达范围门禁 ==")
+toks["resident2"] = login("resident2", "Resident@123")
+toks["operator2"] = login("operator2", "Operator@123")
+# pid2 = 第11节已确认的滨江? 否——pid2 为阳光幼儿园关联工单计划（已 confirmed）；pid 为未确认计划
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["resident2"])
+check("resident2 访问阳光小区计划详情被拒绝(403/404)", s in (403, 404))
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])
+rem0 = next(x for x in r["data"]["reminders"] if x["delivery_status"] == "sent")
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/reminders/{rem0['id']}/deliver", toks["resident2"], {})
+check("resident2 更新提醒送达被拒绝(403/404)", s in (403, 404))
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])
+still = next(x for x in r["data"]["reminders"] if x["id"] == rem0["id"])
+check("越权失败后送达状态数据不变", still["delivery_status"] == "sent")
+# resident 本小区：未确认计划不可见，已确认计划仅公开字段
+s, r = call("GET", f"/api/child-zone-plans/{pid}", toks["resident"])
+check("居民不可见未确认计划详情(404)", s == 404)
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["resident"])
+pub = r["data"]["plan"] if s == 200 else {}
+check("居民可见已确认计划公开字段(安全间隔/恢复时间/避让)", s == 200 and pub.get("safety_interval_hours") and pub.get("recovery_time") and pub.get("avoid_period"))
+check("居民详情不泄露园方电话与提醒明细", "contact_phone" not in pub and not r["data"].get("reminders"))
+s, r = call("GET", "/api/child-zone-plans", toks["resident"])
+check("居民列表仅已确认计划", all(p["status"] == "confirmed" for p in r["data"]))
+check("居民列表不泄露园方电话", all(not p.get("contact_phone") for p in r["data"]))
+# 园方联系人越权：滨江儿童乐园计划（未绑定王园）
+zone2 = next(z for z in call("GET", "/api/child-zones", toks["street"])[1]["data"] if "滨江" in z["name"])
+s, r = call("POST", "/api/child-zone-plans", toks["street"], {
+    "child_zone_id": zone2["id"], "planned_start": dt(21), "planned_end": dt(22),
+    "wind_direction": "西风", "safety_interval_hours": 2})
+pid3 = r["data"]["id"]
+s, r = call("GET", f"/api/child-zone-plans/{pid3}", toks["kindergarten"])
+check("园方仅可读绑定活动区计划(404)", s == 404)
+s, r = call("GET", f"/api/child-zone-plans/{pid3}", toks["resident2"])
+check("本小区居民读未确认计划同样不可见(404)", s == 404)
+# 送达权限：非作业队 operator2 → 403；关联 operator、street、绑定 kindergarten → 成功
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])
+rems2 = {x["audience"]: x for x in r["data"]["reminders"] if x["delivery_status"] == "sent"}
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/reminders/{rems2['parents']['id']}/deliver", toks["operator2"], {})
+check("非实际作业消杀队更新送达被拒绝(403)", s == 403)
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/reminders/{rems2['parents']['id']}/deliver", toks["operator"], {})
+check("实际作业消杀队(operator)可更新送达", s == 200)
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/reminders/{rems2['residents']['id']}/deliver", toks["street"], {})
+check("街道可更新送达", s == 200)
+s, r = call("POST", f"/api/child-zone-plans/{pid2}/reminders/{rems2['kindergarten']['id']}/deliver", toks["kindergarten"], {})
+check("绑定园方可更新送达", s == 200)
+s, r = call("GET", f"/api/child-zone-plans/{pid2}", toks["street"])
+check("三类提醒全部送达", all(x["delivery_status"] == "delivered" for x in r["data"]["reminders"]))
+
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)
