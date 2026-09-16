@@ -246,6 +246,9 @@ func hAssessment(c *Ctx) {
 		PropRectOverdue     int      `json:"prop_rect_overdue"`
 		PropRectVerified    int      `json:"prop_rect_verified"`
 		PropRectRecheckFail int      `json:"prop_rect_recheck_fail"`
+		AccessRefused       int      `json:"access_refused"`
+		AccessRiskContinued int      `json:"access_risk_continued"`
+		AccessCompleted     int      `json:"access_completed"`
 	}
 	rows, err := db.Query(`
 		SELECT cm.id, cm.name,
@@ -262,7 +265,10 @@ func hAssessment(c *Ctx) {
 		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.created_at >= $1::date AND pr.created_at < ($1::date + interval '1 month')),
 		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.created_at >= $1::date AND pr.created_at < ($1::date + interval '1 month') AND pr.recheck_date < current_date AND pr.status != 'verified'),
 		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='verified' AND pr.rechecked_at >= $1::date AND pr.rechecked_at < ($1::date + interval '1 month')),
-		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='rejected' AND pr.updated_at >= $1::date AND pr.updated_at < ($1::date + interval '1 month'))
+		  (SELECT count(*) FROM property_rectifications pr WHERE pr.community_id=cm.id AND pr.status='rejected' AND pr.updated_at >= $1::date AND pr.updated_at < ($1::date + interval '1 month')),
+		  (SELECT count(*) FROM access_cases ac WHERE ac.community_id=cm.id AND ac.created_at >= $1::date AND ac.created_at < ($1::date + interval '1 month')),
+		  (SELECT count(*) FROM access_cases ac WHERE ac.community_id=cm.id AND ac.risk_continued AND ac.updated_at >= $1::date AND ac.updated_at < ($1::date + interval '1 month')),
+		  (SELECT count(*) FROM access_cases ac WHERE ac.community_id=cm.id AND ac.status='completed' AND ac.completed_at >= $1::date AND ac.completed_at < ($1::date + interval '1 month'))
 		FROM communities cm ORDER BY cm.id`, start)
 	if err != nil {
 		jsonErr(c.W, 500, err.Error())
@@ -275,7 +281,8 @@ func hAssessment(c *Ctx) {
 		if err := rows.Scan(&r.CommunityID, &r.CommunityName, &r.Complaints, &r.ComplaintsPrev,
 			&r.OrdersClosed, &r.AvgCloseHours, &r.RecheckTotal, &r.RecheckPass, &r.ChemicalUsed,
 			&r.PropertyIssues, &r.RectTotal, &r.RectVerified,
-			&r.PropRectTotal, &r.PropRectOverdue, &r.PropRectVerified, &r.PropRectRecheckFail); err != nil {
+			&r.PropRectTotal, &r.PropRectOverdue, &r.PropRectVerified, &r.PropRectRecheckFail,
+			&r.AccessRefused, &r.AccessRiskContinued, &r.AccessCompleted); err != nil {
 			jsonErr(c.W, 500, err.Error())
 			return
 		}

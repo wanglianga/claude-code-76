@@ -85,24 +85,24 @@ async function doLogout() {
 /* ---------- 主框架 ---------- */
 const TABS = {
   resident: [
-    ['report', '上报问题'], ['reports', '我的上报'], ['pets', '宠物投诉'], ['zones', '儿童活动区'], ['notices', '居民告知'],
+    ['report', '上报问题'], ['reports', '我的上报'], ['access', '入户授权'], ['pets', '宠物投诉'], ['zones', '儿童活动区'], ['notices', '居民告知'],
   ],
   property: [
-    ['report', '上报问题'], ['rects', '整改任务'], ['prects', '积水整改'], ['emerg', '应急联防'], ['orders', '小区工单'], ['notices', '居民告知'],
+    ['report', '上报问题'], ['rects', '整改任务'], ['prects', '积水整改'], ['access', '入户协调'], ['emerg', '应急联防'], ['orders', '小区工单'], ['notices', '居民告知'],
   ],
   grid: [
-    ['report', '上报问题'], ['points', '积水点管理'], ['prects', '积水整改'], ['emerg', '应急联防'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
+    ['report', '上报问题'], ['points', '积水点管理'], ['prects', '积水整改'], ['access', '入户协调'], ['emerg', '应急联防'], ['orders', '工单与复查'], ['rainfall', '降雨记录'],
   ],
   operator: [
-    ['orders', '我的工单'], ['emerg', '应急联防'], ['prects', '积水整改'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
+    ['orders', '我的工单'], ['access', '入户作业'], ['emerg', '应急联防'], ['prects', '积水整改'], ['zones', '错峰消杀'], ['points', '积水点'], ['chems', '药剂库存'],
   ],
   street: [
-    ['dispatch', '派单中心'], ['emerg', '应急联防'], ['orders', '工单总览'], ['prects', '积水整改'], ['points', '积水点'], ['keylist', '重点积水点'],
+    ['dispatch', '派单中心'], ['emerg', '应急联防'], ['access', '入户协调'], ['orders', '工单总览'], ['prects', '积水整改'], ['points', '积水点'], ['keylist', '重点积水点'],
     ['chems', '药剂库存'], ['sched', '排班管理'], ['rainfall', '降雨记录'], ['risk', '重点风险期'],
     ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['notices', '居民告知'], ['loop', '闭环看板'], ['assess', '考核看板'],
   ],
   supervisor: [
-    ['orders', '工单总览'], ['emerg', '应急联防'], ['prects', '积水整改'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
+    ['orders', '工单总览'], ['access', '入户协调'], ['emerg', '应急联防'], ['prects', '积水整改'], ['keylist', '重点积水点'], ['zones', '错峰消杀'], ['pets', '宠物投诉'], ['archive', '小区档案'], ['loop', '闭环看板'], ['assess', '考核看板'], ['notices', '居民告知'],
   ],
   kindergarten: [
     ['zones', '消杀计划确认'], ['notices', '居民告知'],
@@ -485,6 +485,16 @@ async function renderOrderDetail(id) {
         <td>${pBadge(p.status, p.status_label)}</td>
         <td>${['property', 'grid', 'operator', 'street', 'supervisor'].includes(role)
           ? `<button class="btn sm" onclick="closeModal();switchTab('prects');setTimeout(()=>openPRect(${p.id}),200)">详情</button>` : '-'}</td>
+      </tr>`).join('')}
+    </table></div></div>` : ''}
+    ${(d.access_cases || []).length ? `<div class="section"><h4>居民拒绝入户 / 入户授权</h4><div class="table-wrap"><table>
+      <tr><th>单号</th><th>住户</th><th>位置</th><th>拒绝原因</th><th>外围</th><th>状态</th><th>操作</th></tr>
+      ${d.access_cases.map(a=>`<tr>
+        <td>${esc(a.case_no)}</td><td>${esc(a.resident_name)}</td><td>${esc(a.address)}</td>
+        <td>${(a.reject_reason_labels||[]).map(x=>badge(x,'b-orange')).join(' ')}</td>
+        <td>${a.outdoor_allowed?'可':'否'}</td>
+        <td>${accBadge(a.status,a.status_label)}${a.risk_continued?'<br>'+badge('风险延续·'+a.recheck_interval_days+'天','b-red'):''}</td>
+        <td><button class="btn sm" onclick="closeModal();switchTab('access');setTimeout(()=>openAccess(${a.id}),200)">详情</button></td>
       </tr>`).join('')}
     </table></div></div>` : ''}
     ${actions}
@@ -957,6 +967,242 @@ async function resolveEmerg(id) {
   });
 }
 
+/* ---------- 居民拒绝入户与入户消杀授权 ---------- */
+const ACCESS_COLOR = { refused:'b-red', negotiating:'b-orange', mandatory_review:'b-red', external_only:'b-blue', authorized:'b-purple', in_progress:'b-blue', withdrawn:'b-orange', completed:'b-green', risk_continued:'b-red' };
+function accBadge(s, l) { return badge(l || s, ACCESS_COLOR[s] || 'b-gray'); }
+
+async function renderAccess(el) {
+  const role = me.role;
+  const canRecord = ['operator','grid','street','supervisor','property'].includes(role);
+  let head = '';
+  if (canRecord) {
+    const orders = (await api('/api/work-orders')).filter(o => o.status !== 'closed');
+    const residents = (meta.users || []).filter(u => u.role === 'resident');
+    head = `<div class="card"><h3>登记居民拒绝入户（不强行派单，五方同单协商）</h3>
+      <div class="form-grid">
+        <div class="form-item"><label>关联工单 *</label><select id="ac-order">${orders.map(o=>`<option value="${o.id}">${esc(o.order_no)} ${esc(o.community_name)} ${esc(o.source_desc)}</option>`).join('')}</select></div>
+        <div class="form-item"><label>住户（默认取工单上报人）</label><select id="ac-resident"><option value="">工单上报人</option>${residents.map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join('')}</select></div>
+        <div class="form-item"><label>门牌/位置</label><input id="ac-addr" placeholder="如：3号楼2单元501室"></div>
+        <div class="form-item full"><label>拒绝原因 *（多选）</label><div class="check-row">${Object.entries(meta.access_reject_labels).map(([k,v])=>`<label><input type="checkbox" class="ac-reason" value="${k}"> ${esc(v)}</label>`).join('')}</div></div>
+        <div class="form-item full"><label>家中敏感人群</label><div class="check-row">${Object.entries(meta.access_sensitive_labels).map(([k,v])=>`<label><input type="checkbox" class="ac-sensitive" value="${k}"> ${esc(v)}</label>`).join('')}</div></div>
+        <div class="form-item"><label>宠物情况</label><input id="ac-pets" placeholder="如：小型犬1只"></div>
+        <div class="form-item"><label>可接受时段</label><input id="ac-times" placeholder="如：工作日19点后/周末上午"></div>
+        <div class="form-item full"><label>可接受药剂类型</label><input id="ac-chem" placeholder="如：低毒、有安全间隔说明的药剂"></div>
+        <div class="form-item full"><div class="check-row">
+          <label><input type="checkbox" id="ac-outdoor" onchange="document.getElementById('ac-outdoor-areas').style.display=this.checked?'block':'none'"> 允许处理外围公共区域</label></div></div>
+        <div class="form-item full" id="ac-outdoor-areas" style="display:none"><label>外围区域（多选）</label><div class="check-row">${Object.entries(meta.access_outdoor_labels).map(([k,v])=>`<label><input type="checkbox" class="ac-outarea" value="${k}"> ${esc(v)}</label>`).join('')}</div></div>
+        <div class="form-item full"><label>情况说明</label><textarea id="ac-note" placeholder="拒绝原因、沟通要点等"></textarea></div>
+      </div>
+      <div class="btn-row"><button class="btn orange" onclick="createAccess()">登记拒绝入户</button></div>
+    </div>`;
+  }
+  el.innerHTML = head + `
+  <div class="card"><h3>${role==='resident'?'我的入户授权':'入户授权协调'}（拒绝/沟通/评估/授权/反悔/外围/风险延续，全过程版本化）</h3>
+    <div id="access-table"></div></div>`;
+  await loadAccessList();
+}
+function checkedVals(cls){ return [...document.querySelectorAll('.'+cls+':checked')].map(x=>x.value); }
+async function createAccess() {
+  await run(async () => {
+    const reasons = checkedVals('ac-reason');
+    if (!reasons.length) { toast('请至少选择一项拒绝原因', false); return; }
+    const body = {
+      address: val('ac-addr'), reject_reasons: reasons, reject_note: val('ac-note'),
+      sensitive_groups: checkedVals('ac-sensitive'), pets_desc: val('ac-pets'),
+      acceptable_times: val('ac-times'), acceptable_chemicals: val('ac-chem'),
+      outdoor_allowed: chk('ac-outdoor'), outdoor_areas: checkedVals('ac-outarea'),
+    };
+    if (val('ac-resident')) body.resident_user_id = parseInt(val('ac-resident'));
+    const r = await api(`/api/work-orders/${val('ac-order')}/access-cases`, { method:'POST', body });
+    toast(r.message); switchTab('access');
+  });
+}
+async function loadAccessList() {
+  const list = await api('/api/access-cases');
+  document.getElementById('access-table').innerHTML = `<div class="table-wrap"><table>
+    <tr><th>单号</th><th>小区</th><th>住户</th><th>位置</th><th>拒绝原因</th><th>敏感人群</th><th>可接受时段</th><th>外围</th><th>状态</th><th>操作</th></tr>
+    ${list.map(a=>`<tr style="${a.risk_continued?'background:#fff5f5':''}">
+      <td>${esc(a.case_no)}</td><td>${esc(a.community_name)}</td><td>${esc(a.resident_name)}</td><td>${esc(a.address)}</td>
+      <td>${(a.reject_reason_labels||[]).map(x=>badge(x,'b-orange')).join(' ')}</td>
+      <td>${(a.sensitive_labels||[]).join('、')||'-'}</td>
+      <td>${esc(a.acceptable_times||'-')}</td>
+      <td>${a.outdoor_allowed?badge((a.outdoor_area_labels||[]).join('/'),'b-blue'):'不允许'}</td>
+      <td>${accBadge(a.status,a.status_label)}${a.risk_continued?'<br>'+badge('风险延续·'+a.recheck_interval_days+'天复查','b-red'):''}</td>
+      <td><button class="btn sm" onclick="openAccess(${a.id})">详情</button></td>
+    </tr>`).join('') || '<tr><td colspan="10">暂无入户授权案例</td></tr>'}
+  </table></div>`;
+}
+async function openAccess(id) {
+  document.getElementById('modal-mask').classList.remove('hidden');
+  document.getElementById('modal-body').innerHTML = '加载中...';
+  await run(()=>renderAccessDetail(id));
+}
+async function renderAccessDetail(id) {
+  const a = await api('/api/access-cases/'+id);
+  const role = me.role;
+  const isResident = role==='resident' && a.resident_user_id===me.id;
+  let act = '';
+  // 多方沟通（街道/网格/物业/卫监/消杀）
+  if (['refused','negotiating','mandatory_review'].includes(a.status) && ['street','grid','property','supervisor','operator'].includes(role)) {
+    act += `<div class="section"><h4>上门沟通（街道/社区网格/物业，记录沟通结果、见证人、居民最终意见）</h4>
+      <div class="form-grid">
+        <div class="form-item"><label>见证人</label><input id="an-wit" placeholder="如：楼栋长、物业管家"></div>
+        <div class="form-item"><label>居民最终意见</label><input id="an-final" placeholder="如：愿再沟通/要求书面告知/拒绝"></div>
+        <div class="form-item full"><label>沟通结果 *</label><textarea id="an-note"></textarea></div>
+      </div><div class="btn-row"><button class="btn sm" onclick="accessAct(${id},'negotiate',{note:'an-note',witnesses:'an-wit',final_opinion:'an-final'})">记录沟通</button></div></div>`;
+  }
+  // 卫监强制入户评估
+  if (role==='supervisor' && ['refused','negotiating','mandatory_review'].includes(a.status)) {
+    act += `<div class="section"><h4>卫生监督入户必要性评估（重点风险期/周边疑似病例时可评估必须入户）</h4>
+      <div class="form-item full"><label>评估意见 *</label><textarea id="am-note" placeholder="结合登革热风险期/应急联防/病例轨迹评估"></textarea></div>
+      <div class="btn-row">
+        <button class="btn red sm" onclick="accessAct(${id},'mandatory-assess',{required:true,note:'am-note'})">评估必须入户</button>
+        <button class="btn sm" onclick="accessAct(${id},'mandatory-assess',{required:false,note:'am-note'})">可仅外围处理</button></div></div>`;
+  }
+  // 转外围（关联物业责任与复查）
+  if (['street','supervisor','grid'].includes(role) && ['refused','negotiating','mandatory_review'].includes(a.status)) {
+    act += `<div class="section"><h4>仅拒绝入户 → 转公共区域/外围处理（关联物业责任与复查）</h4>
+      <div class="btn-row"><button class="btn sm orange" onclick="accessGoExternal(${id})">转外围处理并生成物业责任</button></div></div>`;
+  }
+  // 居民授权
+  if (isResident && ['refused','negotiating','mandatory_review','withdrawn'].includes(a.status)) {
+    act += `<div class="section"><h4>居民授权确认（范围/药剂浓度/安全间隔/遮盖/宠物避让/老幼回避/陪同/拍照/告知书）</h4>
+      <div class="form-grid">
+        <div class="form-item full"><label>消杀范围 *</label><input id="aa-scope" placeholder="如：客厅、厨房、卫生间积水点与阳台地漏"></div>
+        <div class="form-item"><label>药剂名称 *</label><input id="aa-chem" value="苏云金杆菌(BTI)"></div>
+        <div class="form-item"><label>浓度</label><input id="aa-conc" placeholder="如：1:100"></div>
+        <div class="form-item"><label>安全间隔(小时) *</label><input id="aa-interval" type="number" step="0.5" value="4"></div>
+        <div class="form-item"><label>陪同人</label><input id="aa-companion" placeholder="如：家属/楼栋长"></div>
+        <div class="form-item full"><div class="check-row">
+          <label><input type="checkbox" id="aa-cover"> 物品遮盖</label>
+          <label><input type="checkbox" id="aa-pet"> 宠物避让</label>
+          <label><input type="checkbox" id="aa-vuln"> 儿童老人孕妇回避</label>
+          <label><input type="checkbox" id="aa-photo"> 同意拍照留证</label>
+          <label><input type="checkbox" id="aa-notice"> 告知书已送达</label></div></div>
+      </div><div class="btn-row"><button class="btn" onclick="submitAuthorize(${id})">确认授权入户</button></div></div>`;
+  }
+  // 消杀开工/完成
+  if (role==='operator' && a.status==='authorized') {
+    act += `<div class="btn-row"><button class="btn" onclick="accessAct(${id},'start',{})">入户作业开始（未授权不得入户）</button></div>`;
+  }
+  if (role==='operator' && a.status==='in_progress') {
+    act += `<div class="section"><h4>入户作业完成</h4><div class="form-grid">
+      <div class="form-item full"><label>户内喷洒区域 *</label><input id="ad-area" placeholder="如：厨房、卫生间、阳台地漏"></div>
+      <div class="form-item"><label>警示牌撤除时间</label><input id="ad-remove" type="datetime-local"></div>
+      <div class="form-item"><label>完成照片链接(逗号分隔)</label><input id="ad-photos"></div>
+      <div class="form-item full"><div class="check-row">
+        <label><input type="checkbox" id="ad-sign"> 已设置警示牌</label>
+        <label><input type="checkbox" id="ad-pet"> 宠物已避让</label>
+        <label><input type="checkbox" id="ad-conf"> 居民已确认</label></div></div>
+      <div class="form-item"><label>儿童安全间隔(小时)</label><input id="ad-interval" type="number" step="0.5" value="${a.auth_safety_interval_hours||4}"></div>
+      </div><div class="btn-row"><button class="btn" onclick="submitAccessComplete(${id})">提交入户完成</button></div></div>`;
+  }
+  // 居民反悔
+  if (isResident && ['authorized','in_progress'].includes(a.status)) {
+    act += `<div class="section"><h4>临时反悔（作业暂停，药剂与排班保留或改约）</h4>
+      <div class="form-grid">
+        <div class="form-item"><label>改约日期</label><input type="date" id="aw-date"></div>
+        <div class="form-item full"><label>反悔原因 *</label><input id="aw-reason" placeholder="如：孩子突然在家/临时来客"></div>
+      </div><div class="btn-row"><button class="btn red sm" onclick="submitWithdraw(${id})">暂停并改约</button></div></div>`;
+  }
+  // 风险延续
+  if (['street','supervisor'].includes(role) && ['refused','negotiating','mandatory_review','external_only','withdrawn'].includes(a.status)) {
+    act += `<div class="section"><h4>无法根治 → 标记风险延续（提高公共区域复查频次，进入考核/下次计划）</h4>
+      <div class="inline-form"><input id="ar-days" type="number" value="2" style="width:80px" title="复查间隔天">
+      <input id="ar-note" placeholder="风险延续说明" style="width:360px">
+      <button class="btn sm red" onclick="submitContinueRisk(${id})">标记风险延续</button></div></div>`;
+  }
+
+  document.getElementById('modal-body').innerHTML = `
+    <span class="close-x" onclick="closeModal()">✕</span>
+    <h2>入户授权 ${esc(a.case_no)} ${accBadge(a.status,a.status_label)}</h2>
+    <div class="sub">${esc(a.community_name)} ｜ 住户 ${esc(a.resident_name)} ｜ ${esc(a.address||'-')} ｜ 关联工单 <a href="#" onclick="closeModal();openOrder(${a.work_order_id});return false;">#${a.work_order_id}</a></div>
+    <div class="section"><h4>拒绝登记</h4><div class="kv">
+      <div style="grid-column:1/-1"><span class="k">拒绝原因：</span>${(a.reject_reason_labels||[]).map(x=>badge(x,'b-orange')).join(' ')}</div>
+      <div><span class="k">敏感人群：</span>${(a.sensitive_labels||[]).join('、')||'-'}</div>
+      <div><span class="k">宠物：</span>${esc(a.pets_desc||'-')}</div>
+      <div><span class="k">可接受时段：</span>${esc(a.acceptable_times||'-')}</div>
+      <div><span class="k">可接受药剂：</span>${esc(a.acceptable_chemicals||'-')}</div>
+      <div style="grid-column:1/-1"><span class="k">外围许可：</span>${a.outdoor_allowed?badge((a.outdoor_area_labels||[]).join('/'),'b-blue'):'不允许'}</div>
+      <div style="grid-column:1/-1"><span class="k">说明：</span>${esc(a.reject_note||'-')}</div>
+    </div></div>
+    ${(a.assess_note||a.mandatory_required)?`<div class="section"><h4>卫生监督入户必要性评估</h4><div class="kv">
+      <div><span class="k">结论：</span>${a.mandatory_required?badge('必须入户','b-red'):badge('可仅外围','b-blue')}</div>
+      <div style="grid-column:1/-1">${esc(a.assess_note||'-')}</div>
+      <div><span class="k">见证人：</span>${esc(a.witnesses||'-')}</div><div><span class="k">居民最终意见：</span>${esc(a.final_opinion||'-')}</div></div></div>`:''}
+    ${a.authorized_at?`<div class="section"><h4>居民授权快照</h4><div class="kv">
+      <div style="grid-column:1/-1"><span class="k">范围：</span>${esc(a.auth_scope)}</div>
+      <div><span class="k">药剂：</span>${esc(a.auth_chemical_name)} ${esc(a.auth_concentration)}</div>
+      <div><span class="k">安全间隔：</span>${a.auth_safety_interval_hours} 小时</div>
+      <div><span class="k">物品遮盖：</span>${a.auth_item_cover?'是':'否'}</div><div><span class="k">宠物避让：</span>${a.auth_pet_avoid?'是':'否'}</div>
+      <div><span class="k">老幼孕回避：</span>${a.auth_vulnerable_avoid?'是':'否'}</div><div><span class="k">陪同人：</span>${esc(a.auth_companion||'-')}</div>
+      <div><span class="k">拍照留证：</span>${a.auth_photo_consent?'已同意':'-'}</div><div><span class="k">告知书：</span>${a.auth_notice_delivered?'已送达':'-'}</div></div></div>`:''}
+    ${a.withdrawn_at?`<div class="section"><h4>临时反悔</h4><div class="kv">
+      <div><span class="k">原因：</span>${esc(a.withdraw_reason)}</div><div><span class="k">改约：</span>${esc(a.reschedule_date||'待协商')}</div>
+      <div><span class="k">药剂/排班：</span>${a.resources_kept?'保留':'另行调度'}</div></div></div>`:''}
+    ${a.external_note?`<div class="section"><h4>外围公共区域处理</h4><div>${esc(a.external_note)}</div></div>`:''}
+    ${a.completed_at?`<div class="section"><h4>入户作业完成（居民端可查看）</h4><div class="kv">
+      <div style="grid-column:1/-1"><span class="k">喷洒区域：</span>${esc(a.spray_area)}</div>
+      <div><span class="k">警示牌：</span>${a.warning_sign?'已设置':'-'}</div><div><span class="k">撤除时间：</span>${fmtT(a.warning_removed_at)}</div>
+      <div><span class="k">宠物避让：</span>${a.pet_avoid_done?'是':'否'}</div><div><span class="k">儿童安全间隔：</span>${a.child_safety_interval_hours} 小时</div>
+      <div><span class="k">居民确认：</span>${a.resident_confirmed?'已确认':'待确认'}</div>
+      <div style="grid-column:1/-1"><span class="k">完成照片：</span>${(a.completion_photos||[]).map(u=>`<a href="${esc(u)}" target="_blank">📷</a>`).join(' ')||'-'}</div></div></div>`:''}
+    ${a.risk_continued?`<div class="banner danger">⚠️ 风险延续：${esc(a.risk_note)}（公共区域复查提高为每 ${a.recheck_interval_days} 天，已进入街道考核与下次消杀计划）</div>`:''}
+    ${act}
+    <div class="section"><h4>版本记录（拒绝/沟通/评估/授权/变更/反悔/延期/外围/完成/风险延续）</h4><div class="timeline">
+      ${(a.versions||[]).map(v=>`<div class="t-item"><b>v${v.version_no} ${esc(v.action)}</b>
+        <div class="t-meta">${fmtT(v.created_at)} ｜ ${esc(v.actor_name||'系统')}（${esc(v.role_label)}）${v.note?' ｜ '+esc(v.note):''}</div></div>`).join('')||'无版本'}
+    </div></div>`;
+}
+async function accessAct(id, action, fields) {
+  await run(async () => {
+    const body = {};
+    for (const [k, el] of Object.entries(fields)) {
+      if (el === true || el === false) body.required = el;
+      else body[k] = val(el);
+    }
+    const r = await api(`/api/access-cases/${id}/${action}`, { method:'POST', body });
+    toast(r.message || r.risk_context || '已保存'); renderAccessDetail(id);
+  });
+}
+async function accessGoExternal(id) {
+  await run(async () => { const r = await api(`/api/access-cases/${id}/external`, { method:'POST', body:{} }); toast(r.message); renderAccessDetail(id); });
+}
+async function submitAuthorize(id) {
+  await run(async () => {
+    const r = await api(`/api/access-cases/${id}/authorize`, { method:'POST', body:{
+      auth_scope: val('aa-scope'), auth_chemical_name: val('aa-chem'), auth_concentration: val('aa-conc'),
+      auth_safety_interval_hours: parseFloat(val('aa-interval'))||0, auth_companion: val('aa-companion'),
+      auth_item_cover: chk('aa-cover'), auth_pet_avoid: chk('aa-pet'), auth_vulnerable_avoid: chk('aa-vuln'),
+      auth_photo_consent: chk('aa-photo'), auth_notice_delivered: chk('aa-notice'),
+    }}); toast(r.message); renderAccessDetail(id);
+  });
+}
+async function submitWithdraw(id) {
+  await run(async () => {
+    const r = await api(`/api/access-cases/${id}/withdraw`, { method:'POST', body:{
+      reason: val('aw-reason'), reschedule_date: val('aw-date'), resources_kept: true,
+    }}); toast(r.message); renderAccessDetail(id);
+  });
+}
+async function submitAccessComplete(id) {
+  await run(async () => {
+    const photos = val('ad-photos')?val('ad-photos').split(',').map(s=>s.trim()).filter(Boolean):[];
+    const r = await api(`/api/access-cases/${id}/complete`, { method:'POST', body:{
+      spray_area: val('ad-area'), warning_sign: chk('ad-sign'), warning_removed_at: val('ad-remove')?new Date(val('ad-remove')).toISOString():'',
+      completion_photos: photos, resident_confirmed: chk('ad-conf'), pet_avoid_done: chk('ad-pet'),
+      child_safety_interval_hours: parseFloat(val('ad-interval'))||0,
+    }}); toast(r.message); renderAccessDetail(id);
+  });
+}
+async function submitContinueRisk(id) {
+  await run(async () => {
+    const r = await api(`/api/access-cases/${id}/continue-risk`, { method:'POST', body:{
+      note: val('ar-note'), recheck_interval_days: parseInt(val('ar-days'))||0,
+    }}); toast(r.message); renderAccessDetail(id);
+  });
+}
+
 /* ---------- 居民告知 ---------- */
 async function renderNotices(el) {
   const list = await api('/api/notifications');
@@ -1158,7 +1404,7 @@ async function loadAssess() {
   const data = await api('/api/dashboard/assessment?month=' + document.getElementById('as-month').value);
   document.getElementById('assess-body').innerHTML = `
   <h4 style="margin:8px 0;color:#33691e">小区维度</h4><div class="table-wrap"><table>
-    <tr><th>小区</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th><th>闭环工单</th><th>平均闭环时长</th><th>复查通过率</th><th>药剂消耗</th><th>物业设施问题</th><th>整改核验</th><th>积水整改(新)</th><th>整改超期</th></tr>
+    <tr><th>小区</th><th>本月投诉</th><th>上月投诉</th><th>投诉下降</th><th>闭环工单</th><th>平均闭环时长</th><th>复查通过率</th><th>药剂消耗</th><th>物业设施问题</th><th>整改核验</th><th>积水整改(新)</th><th>整改超期</th><th>入户拒绝</th><th>风险延续</th><th>入户完成</th></tr>
     ${data.communities.map(r => `<tr>
       <td><b>${esc(r.community_name)}</b></td><td>${r.complaints}</td><td>${r.complaints_prev}</td>
       <td>${r.complaints_prev ? (r.complaint_decline_pct >= 0 ? badge('↓' + r.complaint_decline_pct.toFixed(0) + '%', 'b-green') : badge('↑' + (-r.complaint_decline_pct).toFixed(0) + '%', 'b-red')) : '-'}</td>
@@ -1169,6 +1415,9 @@ async function loadAssess() {
       <td>${r.rectifications_verified}/${r.rectifications_total}</td>
       <td>${r.prop_rect_verified || 0}/${r.prop_rect_total || 0}${r.prop_rect_recheck_fail ? ' ' + badge('返工' + r.prop_rect_recheck_fail, 'b-red') : ''}</td>
       <td>${r.prop_rect_overdue ? badge(r.prop_rect_overdue + ' 起', 'b-red') : 0}</td>
+      <td>${r.access_refused ? badge(r.access_refused + ' 起', 'b-orange') : 0}</td>
+      <td>${r.access_risk_continued ? badge(r.access_risk_continued + ' 起', 'b-red') : 0}</td>
+      <td>${r.access_completed || 0}</td>
     </tr>`).join('')}
   </table></div>
   <h4 style="margin:16px 0 8px;color:#33691e">物业设施责任人维度（地下室积水整改超期影响物业考核）</h4><div class="table-wrap"><table>
@@ -1488,6 +1737,22 @@ async function loadArchive() {
           <td>${fmtT(m.started_at)}<br>${m.resolved_at?fmtT(m.resolved_at):'-'}</td>
         </tr>`).join('') || '<tr><td colspan="8">暂无应急记录</td></tr>'}
       </table></div>
+    </div>
+    <div class="section"><h4>入户拒绝/授权记录（版本化，供考核与复查追溯）</h4>
+      <div>${(a.access_cases_summary?[
+        '共 '+a.access_cases_summary.total+' 起',
+        '已完成 '+a.access_cases_summary.completed,
+        '仅外围 '+a.access_cases_summary.external_only,
+        '风险延续 '+a.access_cases_summary.risk_continued].join(' ｜ '):'')}</div>
+      <div class="table-wrap" style="margin-top:6px"><table>
+        <tr><th>单号</th><th>住户</th><th>状态</th><th>拒绝原因</th><th>风险延续/复查</th><th>版本</th><th>登记</th></tr>
+        ${(a.access_cases||[]).map(m=>`<tr>
+          <td>${esc(m.case_no)}</td><td>${esc(m.resident_name)}</td><td>${accBadge(m.status,m.status_label)}</td>
+          <td>${(m.reject_reasons||[]).map(k=>esc((meta.access_reject_labels||{})[k]||k)).join('、')||'-'}</td>
+          <td>${m.risk_continued?badge('风险延续·'+m.recheck_interval_days+'天','b-red'):'-'}</td>
+          <td>${m.version_count}</td><td>${fmtT(m.created_at)}</td>
+        </tr>`).join('') || '<tr><td colspan="7">暂无入户授权记录</td></tr>'}
+      </table></div>
     </div>`;
 }
 
@@ -1502,6 +1767,7 @@ const TAB_RENDERERS = {
   rects: renderRects,
   prects: renderPRects,
   emerg: renderEmerg,
+  access: renderAccess,
   notices: renderNotices,
   chems: renderChems,
   sched: renderSched,

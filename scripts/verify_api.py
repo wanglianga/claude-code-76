@@ -3,6 +3,7 @@
 import json, urllib.request, sys
 
 import os
+from datetime import datetime, timedelta
 B = os.environ.get("BASE_URL", "http://localhost:3076")
 PASS, FAIL = 0, 0
 
@@ -59,7 +60,7 @@ cands = r["data"]["candidates"]
 check("派单预览有候选", len(cands) > 0, f"({len(cands)} 条)")
 check("评分含风险期加权", any("风险期" in "".join(c["reasons"]) for c in cands))
 check("评分含降雨因子", any("降雨" in "".join(c["reasons"]) for c in cands))
-s, r = call("POST", "/api/dispatch/generate", toks["street"], {"date": "2026-09-15"})
+s, r = call("POST", "/api/dispatch/generate", toks["street"], {"date": datetime.now().strftime("%Y-%m-%d")})
 gen = r["data"]
 check("生成派单", s == 200 and gen["created"] > 0, f"(创建 {gen['created']}，指派 {gen['assigned']})")
 
@@ -166,7 +167,6 @@ s, r = call("POST", f"/api/work-orders/{oid}/treatments", toks["operator"], {
 check("已闭环工单不可再消杀(409)", s == 409)
 
 print("== 11. 儿童活动区错峰消杀 ==")
-from datetime import datetime, timedelta
 toks["kindergarten"] = login("kindergarten", "Kindergarten@123")
 check("园方联系人登录", bool(toks["kindergarten"]))
 s, r = call("GET", "/api/child-zones", toks["street"])
@@ -662,6 +662,129 @@ check("应急工单已关闭", lo["order"]["status"] == "closed")
 arc = call("GET", "/api/communities/3/archive", toks["supervisor"])[1]["data"]
 check("应急处置归入小区消杀档案（含已解除记录）", any(m["emerg_no"] == nd["emergency"]["emerg_no"] and m["status"] == "resolved" for m in arc["emergencies"]))
 check("档案含当前风险等级", arc.get("risk_level_label"))
+
+print("== 17. 居民拒绝入户与入户授权 ==")
+# 17.1 列表/种子案例/权限
+s, r = call("GET", "/api/access-cases", toks["resident"])
+seed_ac = next((x for x in r["data"] if x["case_no"] == "AC00000001"), None)
+check("居民可见自己的入户案例（种子·多方沟通中）", seed_ac and seed_ac["status"] == "negotiating")
+s, r = call("GET", f"/api/access-cases/{seed_ac['id']}", toks["resident"])
+check("案例详情含版本记录(>=2)", s == 200 and len(r["data"]["versions"]) >= 2)
+s, r = call("GET", f"/api/access-cases/{seed_ac['id']}", toks["resident2"])
+check("他人住户无权查看(403)", s == 403)
+
+# 17.2 新建工单：网格员登记居民拒绝入户 → 五方同单、不强行派单
+call("POST", "/api/reports", toks["resident2"], {"type": "mosquito_dense",
+    "location_desc": "滨江花园 6 栋 302 室", "nearby_population": "有孕妇", "has_pets": True,
+    "description": "户内蚊虫多，担心药剂影响孕妇"})
+call("POST", "/api/dispatch/generate", toks["street"], {"date": datetime.now().strftime("%Y-%m-%d")})
+# 找到该上报对应工单（含 report）
+cand = call("GET", "/api/work-orders?community_id=2", toks["street"])[1]["data"]
+ac_oid = None
+for o in cand:
+    dd = call("GET", "/api/work-orders/" + str(o["id"]), toks["street"])[1]["data"]
+    if dd.get("report") and "6 栋 302" in dd["report"]["location_desc"]:
+        ac_oid = o["id"]; break
+check("定位滨江 302 工单", ac_oid is not None)
+s, r = call("POST", f"/api/work-orders/{ac_oid}/access-cases", toks["grid"], {
+    "reject_reasons": ["pregnant", "pets", "distrust_chemical"], "sensitive_groups": ["pregnant"],
+    "pets_desc": "猫1只", "acceptable_times": "周末上午", "acceptable_chemicals": "BTI 低毒",
+    "outdoor_allowed": True, "outdoor_areas": ["doorway", "staircase", "sewer"],
+    "reject_note": "希望先看告知书"})
+check("网格员登记拒绝入户", s == 200 and r["data"]["case_no"].startswith("AC"))
+acid = r["data"]["id"]
+od = call("GET", "/api/work-orders/" + str(ac_oid), toks["street"])[1]["data"]
+roles5 = {p["role"] for p in od["parties"]}
+check("拒绝入户五方同单", {"resident","property","operator","street","supervisor"} <= roles5, f"({roles5})")
+check("工单生成「居民拒绝入户」异常", any(i["type"] == "resident_refused" and i["status"] == "open" for i in od["issues"]))
+check("工单详情含入户案例", len(od["access_cases"]) >= 1)
+# 未授权消杀不得入户
+s, r = call("POST", f"/api/access-cases/{acid}/start", toks["operator2"], {})
+check("未授权不得入户(409)", s == 409)
+
+# 17.3 卫监在重点风险期评估必须入户 + 上门沟通
+s, r = call("POST", f"/api/access-cases/{acid}/mandatory-assess", toks["street"], {"required": True, "note": "x"})
+check("街道无权做卫监评估(403)", s == 403)
+s, r = call("POST", f"/api/access-cases/{acid}/mandatory-assess", toks["supervisor"], {"required": True, "note": "登革热风险期，户内积水风险高，须入户"})
+check("卫监评估必须入户（结合风险期）", s == 200 and "风险" in r["data"]["risk_context"])
+s, r = call("POST", f"/api/access-cases/{acid}/negotiate", toks["property2"], {
+    "note": "物业与网格员上门解释药剂安全性", "witnesses": "楼栋长", "final_opinion": "居民同意周末上午入户"})
+check("上门沟通记录见证人/最终意见", s == 200)
+
+# 17.4 住户授权（要素校验 + 仅本人）
+s, r = call("POST", f"/api/access-cases/{acid}/authorize", toks["resident2"], {
+    "auth_scope": "客厅厨房卫生间", "auth_chemical_name": "苏云金杆菌(BTI)", "auth_concentration": "1:100",
+    "auth_safety_interval_hours": 4, "auth_item_cover": True, "auth_pet_avoid": True, "auth_vulnerable_avoid": True,
+    "auth_companion": "家属", "auth_photo_consent": False, "auth_notice_delivered": True})
+check("未同意拍照留证不可授权(400)", s == 400)
+s, r = call("POST", f"/api/access-cases/{acid}/authorize", toks["resident"], {
+    "auth_scope": "x", "auth_chemical_name": "BTI", "auth_safety_interval_hours": 4, "auth_photo_consent": True, "auth_notice_delivered": True})
+check("非住户本人不可授权(403)", s == 403)
+s, r = call("POST", f"/api/access-cases/{acid}/authorize", toks["resident2"], {
+    "auth_scope": "客厅、厨房、卫生间及阳台地漏", "auth_chemical_name": "苏云金杆菌(BTI)", "auth_concentration": "1:100",
+    "auth_safety_interval_hours": 4, "auth_item_cover": True, "auth_pet_avoid": True, "auth_vulnerable_avoid": True,
+    "auth_companion": "家属陪同", "auth_photo_consent": True, "auth_notice_delivered": True})
+check("住户授权成功", s == 200)
+
+# 17.5 非本队消杀不得开工；本队（工单需先指派二队）开工
+call("POST", f"/api/work-orders/{ac_oid}/assign", toks["street"], {"team_id": 2, "scheduled_date": datetime.now().strftime("%Y-%m-%d")})
+s, r = call("POST", f"/api/access-cases/{acid}/start", toks["operator"], {})
+check("非本队消杀入户被拒绝(403)", s == 403)
+s, r = call("POST", f"/api/access-cases/{acid}/start", toks["operator2"], {})
+check("本队消杀入户开始", s == 200)
+
+# 17.6 作业中居民临时反悔 → 暂停、排班保留；须重新授权
+s, r = call("POST", f"/api/access-cases/{acid}/withdraw", toks["resident2"], {
+    "reason": "孕妇身体不适", "reschedule_date": (datetime.now()+timedelta(days=2)).strftime("%Y-%m-%d"), "resources_kept": True})
+check("居民临时反悔暂停并改约", s == 200)
+s, r = call("POST", f"/api/access-cases/{acid}/start", toks["operator2"], {})
+check("反悔后未重新授权不得入户(409)", s == 409)
+# 重新授权 → 开工 → 完成
+call("POST", f"/api/access-cases/{acid}/authorize", toks["resident2"], {
+    "auth_scope": "客厅、厨房、卫生间", "auth_chemical_name": "苏云金杆菌(BTI)", "auth_concentration": "1:100",
+    "auth_safety_interval_hours": 4, "auth_item_cover": True, "auth_pet_avoid": True, "auth_vulnerable_avoid": True,
+    "auth_companion": "家属", "auth_photo_consent": True, "auth_notice_delivered": True})
+call("POST", f"/api/access-cases/{acid}/start", toks["operator2"], {})
+s, r = call("POST", f"/api/access-cases/{acid}/complete", toks["operator2"], {
+    "spray_area": "厨房、卫生间、阳台地漏", "warning_sign": True, "warning_removed_at": (datetime.now()+timedelta(hours=4)).isoformat(),
+    "completion_photos": ["https://example.com/ac-done.jpg"], "resident_confirmed": True, "pet_avoid_done": True,
+    "child_safety_interval_hours": 4})
+check("入户作业完成", s == 200)
+a = call("GET", f"/api/access-cases/{acid}", toks["resident2"])[1]["data"]
+check("居民端可查看作业与撤除/安全间隔", a["status"] == "completed" and a["warning_removed_at"] and a["resident_confirmed"])
+check("全流程版本化（拒绝/评估/沟通/授权/反悔/再授权/开工/完成 >=8）", len(a["versions"]) >= 8, f"({len(a['versions'])})")
+
+# 17.7 另一户：仅拒绝入户 → 转外围（物业责任）→ 无法根治风险延续提频
+call("POST", "/api/reports", toks["resident2"], {"type": "mosquito_dense",
+    "location_desc": "滨江花园 8 栋 101 室", "nearby_population": "老人", "has_pets": False, "description": "拒入户"})
+call("POST", "/api/dispatch/generate", toks["street"], {"date": datetime.now().strftime("%Y-%m-%d")})
+cand = call("GET", "/api/work-orders?community_id=2", toks["street"])[1]["data"]
+ext_oid = None
+for o in cand:
+    dd = call("GET", "/api/work-orders/" + str(o["id"]), toks["street"])[1]["data"]
+    if dd.get("report") and "8 栋 101" in dd["report"]["location_desc"]:
+        ext_oid = o["id"]; break
+s, r = call("POST", f"/api/work-orders/{ext_oid}/access-cases", toks["operator2"], {
+    "reject_reasons": ["elderly", "privacy"], "sensitive_groups": ["elderly"], "outdoor_allowed": True,
+    "outdoor_areas": ["doorway", "sewer"], "reject_note": "老人拒绝入户，仅同意外围"})
+extid = r["data"]["id"]
+check("登记第二户拒绝入户", s == 200)
+s, r = call("POST", f"/api/access-cases/{extid}/external", toks["street"], {"note": "仅处理门口与下水道外围"})
+check("转外围并生成物业责任", s == 200 and r["data"]["rectification_id"])
+exta = call("GET", f"/api/access-cases/{extid}", toks["street"])[1]["data"]
+check("外围状态与整改关联", exta["status"] == "external_only" and exta["external_rectification_id"])
+s, r = call("POST", f"/api/access-cases/{extid}/continue-risk", toks["supervisor"], {
+    "note": "户内积水无法根治，公共区域加密复查", "recheck_interval_days": 2})
+check("标记风险延续并提频为2天", s == 200 and r["data"]["recheck_interval_days"] == 2)
+
+# 17.8 风险延续纳入考核与小区档案
+ass = call("GET", "/api/dashboard/assessment?month=" + datetime.now().strftime("%Y-%m"), toks["street"])[1]["data"]
+brow = next(x for x in ass["communities"] if x["community_name"] == "滨江花园")
+check("考核含入户拒绝/风险延续指标", brow["access_refused"] >= 2 and brow["access_risk_continued"] >= 1 and brow["access_completed"] >= 1,
+      f"(拒绝{brow['access_refused']}, 延续{brow['access_risk_continued']}, 完成{brow['access_completed']})")
+arc = call("GET", "/api/communities/2/archive", toks["supervisor"])[1]["data"]
+check("小区档案含入户授权汇总与案例", arc["access_cases_summary"]["total"] >= 2 and any(x["case_no"] == "AC%08d" % acid for x in arc["access_cases"]))
+check("档案案例含版本数", all(x["version_count"] >= 1 for x in arc["access_cases"]))
 
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

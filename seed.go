@@ -322,6 +322,9 @@ func seed() {
 	// ========== 重点风险期应急响应与跨小区联防调度（演示） ==========
 	seedEmergency(commIDs, teamIDs, userIDs)
 
+	// ========== 居民拒绝入户与入户授权（演示：多方沟通中，版本化） ==========
+	seedAccessCase(commIDs, teamIDs, userIDs)
+
 	refreshKeyWaterPoints()
 	log.Println("seed done")
 }
@@ -421,4 +424,56 @@ func seedEmergency(commIDs, teamIDs map[string]int64, userIDs map[string]int64) 
 		VALUES($1,NULL,$2,1,1,1,6.0,2,0,0)`, eid2, time.Now().AddDate(0, 0, -34).Format("2006-01-02"))
 	// 历史应急小区风险已降级为常态
 	db.Exec(`UPDATE communities SET risk_level='normal', risk_reason='', risk_updated_at=now() WHERE id=$1`, lao)
+}
+
+// seedAccessCase 构造一个“居民拒绝入户、多方沟通中”的入户授权案例（版本化）
+func seedAccessCase(commIDs, teamIDs map[string]int64, userIDs map[string]int64) {
+	yang := commIDs["阳光小区"]
+	// 关联住户投诉（户内蚊虫）与一张不强行派单的协同工单
+	var rid int64
+	if err := db.QueryRow(`INSERT INTO reports(report_no, reporter_id, community_id, type, location_desc, nearby_population, has_pets, description, status, created_at)
+		VALUES('', $1, $2, 'mosquito_dense', '3号楼2单元501室', '有老人与儿童', true, '家中蚊虫多，担心药剂影响孩子和宠物，暂不愿入户', 'processing', $3) RETURNING id`,
+		userIDs["resident"], yang, time.Now().AddDate(0, 0, -2)).Scan(&rid); err != nil {
+		log.Fatalf("seed access report: %v", err)
+	}
+	db.Exec(`UPDATE reports SET report_no='RPT'||LPAD(id::text,8,'0') WHERE id=$1`, rid)
+
+	var oid int64
+	if err := db.QueryRow(`INSERT INTO work_orders(community_id, report_id, priority, status, created_by, created_at)
+		VALUES($1,$2,60,'escalated',$3,$4) RETURNING id`, yang, rid, userIDs["street"], time.Now().AddDate(0, 0, -2)).Scan(&oid); err != nil {
+		log.Fatalf("seed access order: %v", err)
+	}
+	db.Exec(`UPDATE work_orders SET order_no='WO'||LPAD(id::text,8,'0') WHERE id=$1`, oid)
+	ensureAllParties(oid)
+
+	var aid int64
+	if err := db.QueryRow(`INSERT INTO access_cases
+		(work_order_id, community_id, resident_user_id, address, status, reject_reasons, reject_note, sensitive_groups,
+		 pets_desc, acceptable_times, acceptable_chemicals, outdoor_allowed, outdoor_areas, recorded_by, rejected_at,
+		 witnesses, final_opinion, created_at, updated_at)
+		VALUES($1,$2,$3,'3号楼2单元501室','negotiating',
+		 $4::jsonb,'担心药剂气味与残留，希望先看到告知书和药剂说明',$5::jsonb,
+		 '家有一只小型犬','工作日 19:00 后或周末上午','低毒、有安全间隔说明的药剂，倾向苏云金杆菌(BTI)',
+		 true,$6::jsonb,$7,$8,
+		 '楼栋长王阿姨、物业管家','居民愿意再沟通，要求陪同人在场并提供书面告知',$9,$9) RETURNING id`,
+		oid, yang, userIDs["resident"],
+		`["pets","children","distrust_chemical"]`,
+		`["children","elderly"]`,
+		`["doorway","staircase","balcony","sewer"]`,
+		userIDs["grid"], time.Now().AddDate(0, 0, -2),
+		time.Now().AddDate(0, 0, -2)).Scan(&aid); err != nil {
+		log.Fatalf("seed access case: %v", err)
+	}
+	db.Exec(`UPDATE access_cases SET case_no='AC'||LPAD(id::text,8,'0') WHERE id=$1`, aid)
+
+	addLog(oid, nil, "居民拒绝入户", "网格员登记：不强行派单，五方同单协商；居民可接受工作日晚间/周末上午，允许门口/楼道/阳台外围/下水道处理")
+	addLog(oid, nil, "入户沟通", "街道、物业、楼栋长首次上门，居民要求书面告知书与陪同人，待二次沟通（见证人：楼栋长王阿姨、物业管家）")
+
+	// 版本化：v1 登记拒绝、v2 上门沟通
+	db.Exec(`INSERT INTO access_case_versions(case_id, version_no, action, actor_id, actor_role, snapshot, note)
+		SELECT $1,1,'登记拒绝入户',$2,'grid', to_jsonb(t),'居民因宠物/儿童/药剂顾虑拒绝入户'
+		FROM (SELECT * FROM access_cases WHERE id=$1) t`, aid, userIDs["grid"])
+	db.Exec(`INSERT INTO access_case_versions(case_id, version_no, action, actor_id, actor_role, snapshot, note)
+		SELECT $1,2,'上门沟通记录',$2,'street', to_jsonb(t),'首次上门，记录见证人与居民最终意见'
+		FROM (SELECT * FROM access_cases WHERE id=$1) t`, aid, userIDs["street"])
 }

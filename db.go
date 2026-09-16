@@ -489,4 +489,95 @@ CREATE TABLE IF NOT EXISTS emergency_daily_summaries (
   UNIQUE(emergency_id, community_id, summary_date)
 );
 CREATE INDEX IF NOT EXISTS idx_emerg_daily ON emergency_daily_summaries(emergency_id, summary_date);
+
+-- ========== 居民拒绝入户与入户消杀授权处理 ==========
+-- 居民拒绝入户时不强行派单，居民/物业/消杀队/街道/卫生监督在同一工单协商；
+-- 授权/反悔/外围/风险延续全过程版本化保存。
+CREATE TABLE IF NOT EXISTS access_cases (
+  id BIGSERIAL PRIMARY KEY,
+  case_no TEXT NOT NULL DEFAULT '',
+  work_order_id BIGINT NOT NULL REFERENCES work_orders(id),
+  community_id BIGINT NOT NULL REFERENCES communities(id),
+  resident_user_id BIGINT NOT NULL REFERENCES users(id),
+  address TEXT NOT NULL DEFAULT '',                  -- 户内位置（楼栋门牌等）
+
+  -- 拒绝登记
+  status TEXT NOT NULL DEFAULT 'refused',            -- refused|negotiating|mandatory_review|external_only|authorized|in_progress|withdrawn|completed|risk_continued
+  reject_reasons JSONB NOT NULL DEFAULT '[]',        -- privacy|children|elderly|pregnant|pets|respiratory|distrust_chemical|other
+  reject_note TEXT NOT NULL DEFAULT '',
+  sensitive_groups JSONB NOT NULL DEFAULT '[]',      -- children|elderly|pregnant|respiratory
+  pets_desc TEXT NOT NULL DEFAULT '',
+  acceptable_times TEXT NOT NULL DEFAULT '',
+  acceptable_chemicals TEXT NOT NULL DEFAULT '',
+  outdoor_allowed BOOLEAN NOT NULL DEFAULT false,
+  outdoor_areas JSONB NOT NULL DEFAULT '[]',         -- doorway|staircase|balcony|sewer
+  recorded_by BIGINT REFERENCES users(id),
+  rejected_at TIMESTAMPTZ,
+
+  -- 多方沟通 / 卫监强制入户评估（重点风险期或周边疑似病例）
+  mandatory_required BOOLEAN NOT NULL DEFAULT false,
+  assess_by BIGINT REFERENCES users(id),
+  assess_note TEXT NOT NULL DEFAULT '',
+  assessed_at TIMESTAMPTZ,
+  witnesses TEXT NOT NULL DEFAULT '',
+  final_opinion TEXT NOT NULL DEFAULT '',
+
+  -- 居民授权快照
+  auth_scope TEXT NOT NULL DEFAULT '',
+  auth_chemical_name TEXT NOT NULL DEFAULT '',
+  auth_concentration TEXT NOT NULL DEFAULT '',
+  auth_safety_interval_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+  auth_item_cover BOOLEAN NOT NULL DEFAULT false,
+  auth_pet_avoid BOOLEAN NOT NULL DEFAULT false,
+  auth_vulnerable_avoid BOOLEAN NOT NULL DEFAULT false,
+  auth_companion TEXT NOT NULL DEFAULT '',
+  auth_photo_consent BOOLEAN NOT NULL DEFAULT false,
+  auth_notice_delivered BOOLEAN NOT NULL DEFAULT false,
+  authorized_at TIMESTAMPTZ,
+
+  -- 临时反悔 / 改约（药剂与排班保留或改约）
+  withdraw_reason TEXT NOT NULL DEFAULT '',
+  reschedule_date DATE,
+  resources_kept BOOLEAN NOT NULL DEFAULT true,
+  withdrawn_at TIMESTAMPTZ,
+
+  -- 仅外围公共区域处理（关联物业责任与复查）
+  external_rectification_id BIGINT REFERENCES property_rectifications(id),
+  external_note TEXT NOT NULL DEFAULT '',
+
+  -- 入户作业完成
+  spray_area TEXT NOT NULL DEFAULT '',
+  warning_sign BOOLEAN NOT NULL DEFAULT false,
+  warning_removed_at TIMESTAMPTZ,
+  completion_photos JSONB NOT NULL DEFAULT '[]',
+  resident_confirmed BOOLEAN NOT NULL DEFAULT false,
+  pet_avoid_done BOOLEAN NOT NULL DEFAULT false,
+  child_safety_interval_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+  completed_by BIGINT REFERENCES users(id),
+  completed_at TIMESTAMPTZ,
+
+  -- 因拒绝入户无法根治 → 风险延续（提高公共区域复查频次，进入考核/计划）
+  risk_continued BOOLEAN NOT NULL DEFAULT false,
+  risk_note TEXT NOT NULL DEFAULT '',
+  recheck_interval_days INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_access_order ON access_cases(work_order_id);
+CREATE INDEX IF NOT EXISTS idx_access_resident ON access_cases(resident_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_access_community ON access_cases(community_id, status);
+
+-- 全量版本化：拒绝/沟通/评估/授权/变更/反悔/延期/外围/完成/风险延续
+CREATE TABLE IF NOT EXISTS access_case_versions (
+  id BIGSERIAL PRIMARY KEY,
+  case_id BIGINT NOT NULL REFERENCES access_cases(id) ON DELETE CASCADE,
+  version_no INT NOT NULL,
+  action TEXT NOT NULL,
+  actor_id BIGINT REFERENCES users(id),
+  actor_role TEXT NOT NULL DEFAULT '',
+  snapshot JSONB NOT NULL DEFAULT '{}',
+  note TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_access_versions ON access_case_versions(case_id, version_no);
 `

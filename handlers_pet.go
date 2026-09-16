@@ -506,5 +506,45 @@ func hCommunityArchive(c *Ctx) {
 	archive["risk_level_label"] = labelOf(CommunityRiskLabels, riskLevel)
 	archive["risk_reason"] = riskReason
 
+	// 入户授权/拒绝记录（版本化案例，供街道考核与后续复查追溯）
+	var accTotal, accAuthorized, accCompleted, accExternal, accRisk int
+	db.QueryRow(`SELECT count(*) FROM access_cases WHERE community_id=$1`, id).Scan(&accTotal)
+	db.QueryRow(`SELECT count(*) FROM access_cases WHERE community_id=$1 AND status IN ('authorized','in_progress')`, id).Scan(&accAuthorized)
+	db.QueryRow(`SELECT count(*) FROM access_cases WHERE community_id=$1 AND status='completed'`, id).Scan(&accCompleted)
+	db.QueryRow(`SELECT count(*) FROM access_cases WHERE community_id=$1 AND status='external_only'`, id).Scan(&accExternal)
+	db.QueryRow(`SELECT count(*) FROM access_cases WHERE community_id=$1 AND risk_continued`, id).Scan(&accRisk)
+	archive["access_cases_summary"] = map[string]int{
+		"total": accTotal, "authorized": accAuthorized, "completed": accCompleted,
+		"external_only": accExternal, "risk_continued": accRisk,
+	}
+	type accArc struct {
+		CaseNo              string    `json:"case_no"`
+		ResidentName        string    `json:"resident_name"`
+		Status              string    `json:"status"`
+		StatusLabel         string    `json:"status_label"`
+		RejectReasons       []string  `json:"reject_reasons"`
+		RiskContinued       bool      `json:"risk_continued"`
+		RecheckIntervalDays int       `json:"recheck_interval_days"`
+		VersionCount        int       `json:"version_count"`
+		CreatedAt           time.Time `json:"created_at"`
+	}
+	accList := []accArc{}
+	if acrows, err := db.Query(`SELECT ac.case_no, u.name, ac.status, ac.reject_reasons, ac.risk_continued,
+		ac.recheck_interval_days,
+		(SELECT count(*) FROM access_case_versions v WHERE v.case_id=ac.id), ac.created_at
+		FROM access_cases ac JOIN users u ON u.id=ac.resident_user_id
+		WHERE ac.community_id=$1 ORDER BY ac.id DESC LIMIT 20`, id); err == nil {
+		defer acrows.Close()
+		for acrows.Next() {
+			var x accArc
+			var reasons StringList
+			acrows.Scan(&x.CaseNo, &x.ResidentName, &x.Status, &reasons, &x.RiskContinued, &x.RecheckIntervalDays, &x.VersionCount, &x.CreatedAt)
+			x.StatusLabel = labelOf(AccessStatusLabels, x.Status)
+			x.RejectReasons = reasons
+			accList = append(accList, x)
+		}
+	}
+	archive["access_cases"] = accList
+
 	jsonOK(c.W, archive)
 }

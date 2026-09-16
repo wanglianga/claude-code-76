@@ -57,6 +57,7 @@ func main() {
 	registerPetRoutes()
 	registerPropertyRectRoutes()
 	registerEmergencyRoutes()
+	registerAccessRoutes()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(); err != nil {

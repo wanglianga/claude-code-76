@@ -136,9 +136,15 @@ func recheckIntervalDays() int {
 	return 7
 }
 
-// recheckIntervalForCommunity 应急联防小区优先采用应急复查频次，其次重点风险期，默认 7 天
+// recheckIntervalForCommunity 应急联防小区优先采用应急复查频次，其次风险延续/重点风险期，默认 7 天
 func recheckIntervalForCommunity(communityID int64) int {
 	if iv, ok := emergencyRecheckInterval(communityID); ok {
+		return iv
+	}
+	// 因拒绝入户无法根治、标记风险延续的案例：提高公共区域复查频次
+	var iv int
+	if db.QueryRow(`SELECT MIN(recheck_interval_days) FROM access_cases
+		WHERE community_id=$1 AND risk_continued AND recheck_interval_days > 0 AND status='risk_continued'`, communityID).Scan(&iv) == nil && iv > 0 {
 		return iv
 	}
 	return recheckIntervalDays()
@@ -546,6 +552,38 @@ func hGetOrder(c *Ctx) {
 		}
 	}
 	detail["property_rectifications"] = ppRects
+
+	// 入户授权案例（居民拒绝入户/授权/反悔/外围/风险延续，版本化）
+	type AccessBrief struct {
+		ID               int64    `json:"id"`
+		CaseNo           string   `json:"case_no"`
+		ResidentName     string   `json:"resident_name"`
+		Address          string   `json:"address"`
+		Status           string   `json:"status"`
+		StatusLabel      string   `json:"status_label"`
+		RejectLabels     []string `json:"reject_reason_labels"`
+		OutdoorAllowed   bool     `json:"outdoor_allowed"`
+		RiskContinued    bool     `json:"risk_continued"`
+		RecheckInterval  int      `json:"recheck_interval_days"`
+	}
+	accessBriefs := []AccessBrief{}
+	if acrows, err := db.Query(`SELECT id, case_no, resident_user_id, address, status, reject_reasons, outdoor_allowed, risk_continued, recheck_interval_days
+		FROM access_cases WHERE work_order_id=$1 ORDER BY id`, id); err == nil {
+		defer acrows.Close()
+		for acrows.Next() {
+			var x AccessBrief
+			var rid int64
+			var reasons StringList
+			acrows.Scan(&x.ID, &x.CaseNo, &rid, &x.Address, &x.Status, &reasons, &x.OutdoorAllowed, &x.RiskContinued, &x.RecheckInterval)
+			db.QueryRow(`SELECT name FROM users WHERE id=$1`, rid).Scan(&x.ResidentName)
+			x.StatusLabel = labelOf(AccessStatusLabels, x.Status)
+			for _, r := range reasons {
+				x.RejectLabels = append(x.RejectLabels, labelOf(AccessRejectReasonLabels, r))
+			}
+			accessBriefs = append(accessBriefs, x)
+		}
+	}
+	detail["access_cases"] = accessBriefs
 
 	// 时间线
 	type Log struct {

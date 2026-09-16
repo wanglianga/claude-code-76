@@ -341,6 +341,49 @@ var EmergResourceLabels = map[string]string{
 	"supervisor": "卫生监督",
 }
 
+// ========== 居民拒绝入户与入户授权 ==========
+
+// 入户案例状态
+var AccessStatusLabels = map[string]string{
+	"refused":          "拒绝入户",
+	"negotiating":      "多方沟通中",
+	"mandatory_review": "卫监强制入户评估",
+	"external_only":    "仅外围公共区域处理",
+	"authorized":       "已授权待作业",
+	"in_progress":      "入户作业中",
+	"withdrawn":        "居民临时反悔暂停",
+	"completed":        "入户作业已完成",
+	"risk_continued":   "风险延续（无法根治）",
+}
+
+// 拒绝原因
+var AccessRejectReasonLabels = map[string]string{
+	"privacy":           "隐私顾虑",
+	"children":          "家中有儿童",
+	"elderly":           "家中有老人",
+	"pregnant":          "家中有孕妇",
+	"pets":              "家中有宠物",
+	"respiratory":       "呼吸道疾病患者",
+	"distrust_chemical": "对药剂不信任",
+	"other":             "其他",
+}
+
+// 家中敏感人群
+var AccessSensitiveLabels = map[string]string{
+	"children":    "儿童",
+	"elderly":     "老人",
+	"pregnant":    "孕妇",
+	"respiratory": "呼吸道疾病",
+}
+
+// 可授权处理的外围区域
+var AccessOutdoorAreaLabels = map[string]string{
+	"doorway":   "门口",
+	"staircase": "楼道",
+	"balcony":   "阳台外围",
+	"sewer":     "下水道/地漏",
+}
+
 var IssueStatusLabels = map[string]string{
 	"open":     "待处理",
 	"resolved": "已解决",
